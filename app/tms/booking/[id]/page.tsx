@@ -378,30 +378,28 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
       // Combine Tai_Xe + SDT for column G
       const taiXeDisplay = [form.Tai_Xe, form.SDT_Tai_Xe].filter(Boolean).join(' ');
 
-      // ── Build 26-field payload matching 1.Data_Xe_BK A→Z ──
+      // ── Build payload matching 1.Data_Xe_BK 34-col schema A→AH ──
       const payload = {
         action          : 'createChuyen',
-        ID_CODE         : bangkeId,                              // A
-        ID              : chuyenId,                              // B
-        Ngay            : toDateVN(form.Ngay),                   // C
-        Booking         : form.Note || '',                       // D (mô tả chuyến)
-        Bien_So         : form.Bien_So,                          // F
-        Tai_Xe          : taiXeDisplay,                          // G
-        Tai_Trong       : form.Tai_Trong || '',                  // H
-        Equipment_Type  : form.Loai_Xe_YC || '',                 // I
-        Diem_Nhan       : form.Dia_Chi_Nhan,                     // J
-        Diem_Giao       : form.Dia_Chi_Giao,                     // K
-        Don_Gia_Doitac  : parseFloat(form.Don_Gia_KH) || 0,      // L
-        Phi_Khac_Doitac : parseFloat(form.Phi_Khac_KH) || 0,     // M
-        Don_Gia_NCC     : parseFloat(form.Don_Gia_NCC) || 0,     // N
-        Phat_Sinh       : parseFloat(form.Phat_Sinh_NCC) || 0,   // O
-        Doi_Tac         : duAn || '',                             // P
-        NCC             : form.NCC,                              // Q
-        Tinh_Trang      : 'Chờ cập nhật',                        // R
-        Note            : form.Note || '',                       // S
-        SVD             : form.So_Bill || '',                     // T
-        Code_Tuyen      : '',                                    // Y
-        NV_Update       : nvUpdate,                              // Z
+        ID_PXK          : bangkeId,                              //  0 A: FK phiếu BK
+        ID              : chuyenId,                              //  1 B: trip ID
+        Ngay            : toDateVN(form.Ngay),                   //  2 C: dd/mm/yyyy
+        Du_An           : duAn || '',                            //  3 D: Dự án
+        Dia_Chi_Nhan    : form.Dia_Chi_Nhan,                     //  4 E: Điểm nhận
+        Dia_Chi_Giao    : form.Dia_Chi_Giao,                     //  5 F: Điểm giao
+        Nguoi_YC        : nvUpdate,                              //  6 G: Người yêu cầu
+        Thoi_Gian_BK    : form.Thoi_Gian_BK || '',               //  7 H: Thời gian BK
+        So_Bill         : form.So_Bill || '',                     // 14 O: Số bill
+        Bien_So         : form.Bien_So,                          // 15 P: Biển số
+        Loai_xe_YC      : form.Note || form.Loai_Xe_YC || '',    // 17 R: Loại xe YC / mô tả
+        Trang_Thai      : 'Chờ cập nhật',                        // 22 W: Trạng thái
+        Tai_Xe          : taiXeDisplay,                          // 23 X: Tài xế
+        Trong_Luong     : form.Tai_Trong || '',                  // 24 Y: Trọng lượng
+        NCC             : form.NCC,                              // 26 AA: NCC
+        Don_Gia         : parseFloat(form.Don_Gia_NCC) || 0,     // 27 AB: Đơn giá NCC
+        Phi_Khac        : parseFloat(form.Phat_Sinh_NCC) || 0,   // 28 AC: Phí khác NCC
+        Cuoc_Thu_KH     : parseFloat(form.Don_Gia_KH) || 0,     // 29 AD: Cước thu KH
+        Cuoc_Khac_Thu_KH: parseFloat(form.Phi_Khac_KH) || 0,    // 30 AE: Cước khác KH
       };
 
       console.log('[AddTrip] Payload:', JSON.stringify(payload).slice(0, 300));
@@ -661,27 +659,33 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
           <div>
             <SectionLabel>💰 Thông tin tài chính</SectionLabel>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 10 }}>
-              <Field label="Tải Trọng (kg)">
+              <Field label="Trọng Lượng (kg)">
                 <input type="number" value={form.Tai_Trong} onChange={setF('Tai_Trong')}
                   placeholder="0" style={inputStyle()} />
               </Field>
-              <Field label="Đơn Giá KH">
+              <Field label="Cước Thu KH" badge={
+                <span style={{ fontSize: 8, color: C.muted }}>(AD)</span>
+              }>
                 <input type="number" value={form.Don_Gia_KH} onChange={setF('Don_Gia_KH')}
                   placeholder="VND" style={inputStyle()} />
               </Field>
-              <Field label="Phí Khác KH">
+              <Field label="Cước Khác KH" badge={
+                <span style={{ fontSize: 8, color: C.muted }}>(AE)</span>
+              }>
                 <input type="number" value={form.Phi_Khac_KH} onChange={setF('Phi_Khac_KH')}
                   placeholder="0" style={inputStyle()} />
               </Field>
               <Field label="Đơn Giá NCC" badge={
                 form.Loai_Xe_YC ? (
                   <span style={{ fontSize: 9, color: '#16A34A', marginLeft: 4 }}>↻ auto</span>
-                ) : undefined
+                ) : <span style={{ fontSize: 8, color: C.muted }}>(AB)</span>
               }>
                 <input type="number" value={form.Don_Gia_NCC} onChange={setF('Don_Gia_NCC')}
                   placeholder="VND" style={inputStyle()} />
               </Field>
-              <Field label="Phát Sinh NCC">
+              <Field label="Phí Khác NCC" badge={
+                <span style={{ fontSize: 8, color: C.muted }}>(AC)</span>
+              }>
                 <input type="number" value={form.Phat_Sinh_NCC} onChange={setF('Phat_Sinh_NCC')}
                   placeholder="0" style={inputStyle()} />
               </Field>
