@@ -263,6 +263,7 @@ function updatePhieuBK(data) {
 
 // ============================================================
 // createChuyen — THÊM CHUYẾN XE (ghi vào 1.Data_Xe_BK)
+// Schema: 26 cột A→Z, dùng index thay tên để tránh lỗi ký tự đặc biệt
 // ============================================================
 function createChuyen(data) {
   var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
@@ -272,45 +273,147 @@ function createChuyen(data) {
     return { success: false, error: 'Sheet "' + SHEET_NAMES.CHUYEN + '" không tồn tại' };
   }
 
-  // Nếu frontend gửi rowData array → dùng trực tiếp
-  if (data.rowData && Array.isArray(data.rowData)) {
-    sheet.appendRow(data.rowData);
-    return {
-      success: true,
-      row: sheet.getLastRow(),
-      message: "Đã thêm chuyến vào dòng " + sheet.getLastRow(),
-    };
+  // Validate required fields
+  var chuyenId = (data.ID || "").toString().trim();
+  var bangkeId = (data.ID_CODE || "").toString().trim();
+  if (!bangkeId) {
+    return { success: false, error: "Thiếu ID_CODE (mã phiếu booking cha)" };
+  }
+  if (!chuyenId) {
+    return { success: false, error: "Thiếu ID (mã chuyến xe)" };
   }
 
-  // Build row từ named fields
-  // Header sheet 1.Data_Xe_BK (cần xác nhận với sheet thực tế)
+  // Check duplicate trip ID (column B)
+  var lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    var existingIDs = sheet.getRange(2, 2, lastRow - 1, 1).getValues().flat();
+    for (var i = 0; i < existingIDs.length; i++) {
+      if (existingIDs[i].toString().trim() === chuyenId) {
+        return { success: false, error: "ID chuyến đã tồn tại: " + chuyenId };
+      }
+    }
+  }
+
+  // Build row đúng thứ tự 26 cột A → Z
+  // Dùng array index thay tên cột để tránh lỗi ký tự đặc biệt (cột O, R có dấu)
   var row = [
-    data.ID_CODE         || "",     // Mã phiếu booking cha
-    data.Ngay            || "",     // Ngày
-    data.Bien_So         || "",     // Biển số
-    data.Tai_Xe          || "",     // Tài xế
-    data.SDT_Tai_Xe      || "",     // SĐT tài xế
-    data.NCC             || "",     // NCC
-    data.Loai_Xe         || "",     // Loại xe
-    data.Dia_Chi_Nhan    || "",     // Địa chỉ nhận
-    data.Dia_Chi_Giao    || "",     // Địa chỉ giao
-    toNumber(data.Don_Gia_KH),      // Đơn giá KH
-    toNumber(data.Don_Gia_NCC),     // Đơn giá NCC
-    toNumber(data.PS_NCC),          // Phát sinh NCC
-    data.So_Bill         || "",     // Số bill/vận đơn
-    data.Trang_Thai      || "Chờ cập nhật", // Trạng thái
-    data.Ghi_Chu_Chuyen  || "",     // Ghi chú chuyến
-    data.NV_Update       || "",     // NV Update
-    data.Hinh_Anh        || "",     // Hình ảnh (URLs)
+    bangkeId,                                    // A: ID_CODE (FK phiếu BK)
+    chuyenId,                                    // B: ID chuyến (UUID 8 hex)
+    data.Ngay                 || "",             // C: Ngày (dd/mm/yyyy)
+    data.Booking              || "",             // D: Mô tả chuyến (free-text)
+    "",                                          // E: (trống cố định)
+    data.Bien_So              || "",             // F: Biển số xe
+    data.Tai_Xe               || "",             // G: Tài xế + SĐT
+    data.Tai_Trong            || "",             // H: Tải trọng
+    data.Equipment_Type       || "",             // I: Loại xe (VH5, VH8...)
+    data.Diem_Nhan            || "",             // J: Điểm nhận
+    data.Diem_Giao            || "",             // K: Điểm giao
+    toNumber(data.Don_Gia_Doitac),               // L: Đơn giá KH
+    toNumber(data.Phi_Khac_Doitac),              // M: Phí khác KH (Phi_Khac_Doittac)
+    toNumber(data.Don_Gia_NCC),                  // N: Đơn giá NCC
+    toNumber(data.Phat_Sinh),                    // O: Phát sinh NCC
+    data.Doi_Tac              || "",             // P: Đối tác (= Du_An)
+    data.NCC                  || "",             // Q: Nhà cung cấp
+    data.Tinh_Trang           || "Chờ cập nhật",// R: Trạng thái
+    data.Note                 || "",             // S: Ghi chú xe
+    data.SVD                  || "",             // T: Số vận đơn
+    "",                                          // U: POD1 (trống khi tạo)
+    "",                                          // V: POD2
+    "",                                          // W: POD3
+    "",                                          // X: POD4
+    data.Code_Tuyen           || "",             // Y: Mã tuyến
+    data.NV_Update            || ""              // Z: NV Update
   ];
 
   sheet.appendRow(row);
+  var newRow = sheet.getLastRow();
+
+  // Sau khi ghi chuyến → recalculate tổng cho phiếu BK cha
+  var recalcResult = recalcPhieuBK(bangkeId);
 
   return {
-    success: true,
-    id_code: data.ID_CODE,
-    row: sheet.getLastRow(),
-    message: "Đã thêm chuyến vào dòng " + sheet.getLastRow(),
+    success    : true,
+    chuyen_id  : chuyenId,
+    phieu_id   : bangkeId,
+    row        : newRow,
+    recalc     : recalcResult,
+    message    : "Đã ghi chuyến " + chuyenId + " vào dòng " + newRow
+  };
+}
+
+// ============================================================
+// recalcPhieuBK — Tự động cập nhật tổng phiếu BK sau khi thêm chuyến
+// Tính lại: Tải Tổng (E), Đơn Giá KH (F), Đơn Giá NCC (G), Lợi Nhuận (H)
+// ============================================================
+function recalcPhieuBK(bangkeId) {
+  var ss         = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheetBK    = ss.getSheetByName(SHEET_NAMES.CHUYEN);
+  var sheetPhieu = ss.getSheetByName(SHEET_NAMES.PHIEU_BK);
+
+  if (!sheetBK || !sheetPhieu) {
+    return { success: false, error: "Sheet không tồn tại" };
+  }
+
+  // Lấy toàn bộ data của sheet BK
+  var dataBK = sheetBK.getDataRange().getValues();
+  // dataBK[0] = headers, dataBK[1..] = data rows
+  // Cột A (0) = ID_CODE, H (7) = Tai_Trong
+  // Cột L (11) = Don_Gia_Doitac, M (12) = Phi_Khac_Doitac
+  // Cột N (13) = Don_Gia_NCC, O (14) = Phat_Sinh
+
+  var sumDonGiaKH  = 0;
+  var sumPhiKhacKH = 0;
+  var sumDonGiaNCC = 0;
+  var sumPhatSinh  = 0;
+  var sumTaiTrong  = 0;
+  var tripCount    = 0;
+
+  for (var i = 1; i < dataBK.length; i++) {
+    if (dataBK[i][0].toString().trim() === bangkeId.toString().trim()) {
+      tripCount++;
+      sumDonGiaKH  += parseFloat(dataBK[i][11]) || 0;
+      sumPhiKhacKH += parseFloat(dataBK[i][12]) || 0;
+      sumDonGiaNCC += parseFloat(dataBK[i][13]) || 0;
+      sumPhatSinh  += parseFloat(dataBK[i][14]) || 0;
+      sumTaiTrong  += parseFloat(dataBK[i][7])  || 0;
+    }
+  }
+
+  var totalKH  = sumDonGiaKH + sumPhiKhacKH;
+  var totalNCC = sumDonGiaNCC + sumPhatSinh;
+  var loiNhuan = totalKH - totalNCC;
+
+  // Tìm dòng của phiếu BK trong sheet 1.Data_Xe_PhieuBK
+  var dataPhieu = sheetPhieu.getDataRange().getValues();
+  var phieuRowIdx = -1;
+  for (var j = 1; j < dataPhieu.length; j++) {
+    if (dataPhieu[j][0].toString().trim() === bangkeId.toString().trim()) {
+      phieuRowIdx = j;
+      break;
+    }
+  }
+
+  if (phieuRowIdx === -1) {
+    return { success: false, error: "Không tìm thấy phiếu BK: " + bangkeId };
+  }
+
+  var sheetRow = phieuRowIdx + 1; // +1 vì array 0-indexed nhưng sheet 1-indexed
+
+  // Cập nhật các cột computed trong 1.Data_Xe_PhieuBK:
+  // Cột E (5) = Tai_Tong, F (6) = Don_Gia_KH, G (7) = Don_Gia_NCC, H (8) = Loi_Nhuan
+  sheetPhieu.getRange(sheetRow, 5).setValue(sumTaiTrong); // E
+  sheetPhieu.getRange(sheetRow, 6).setValue(totalKH);     // F
+  sheetPhieu.getRange(sheetRow, 7).setValue(totalNCC);    // G
+  sheetPhieu.getRange(sheetRow, 8).setValue(loiNhuan);    // H
+
+  return {
+    success    : true,
+    bangke_id  : bangkeId,
+    trip_count : tripCount,
+    tai_tong   : sumTaiTrong,
+    don_gia_kh : totalKH,
+    don_gia_ncc: totalNCC,
+    loi_nhuan  : loiNhuan
   };
 }
 

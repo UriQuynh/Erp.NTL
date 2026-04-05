@@ -208,15 +208,15 @@ interface BanggiaData {
 // ═══════════════════════════════════════
 // ADD TRIP MODAL with Smart Suggestions
 // ═══════════════════════════════════════
-function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
-  bangkeId: string; ngay: string; diemNhan: string;
+function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
+  bangkeId: string; ngay: string; diemNhan: string; duAn: string;
   onClose: () => void; onSaved: () => void;
 }) {
   const { user } = useERPAuth();
   const [form, setForm] = useState({
     Ngay: ngay || getTodayISO(),
     Thoi_Gian_BK: new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 16),
-    Dia_Chi_Nhan: diemNhan || '',  // ← Auto-fill from parent booking
+    Dia_Chi_Nhan: diemNhan || '',
     Dia_Chi_Giao: '',
     NCC: '',
     Bien_So: '',
@@ -226,6 +226,12 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
     Trang_Thai: 'Chờ cập nhật',
     So_Bill: '',
     Note: '',
+    // ── Financial fields (26-col schema) ──
+    Tai_Trong: '',
+    Don_Gia_KH: '',
+    Phi_Khac_KH: '',
+    Don_Gia_NCC: '',
+    Phat_Sinh_NCC: '',
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -291,28 +297,33 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
   const setF = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
     setForm(p => ({ ...p, [k]: e.target.value }));
 
-  // ── Auto-fill: NCC change → reset Loai_Xe ──
+  // ── Auto-fill: NCC change → reset Loai_Xe + financial ──
   const handleNCCChange = (v: string) => {
-    setForm(p => ({ ...p, NCC: v, Loai_Xe_YC: '' }));
+    setForm(p => ({ ...p, NCC: v, Loai_Xe_YC: '', Don_Gia_NCC: '' }));
   };
 
-  // ── Auto-fill: Loại Xe → Ghi Chú Chuyến ──
+  // ── Auto-fill: Loại Xe → Ghi Chú Chuyến + Đơn Giá NCC ──
   const handleLoaiXeChange = (v: string) => {
     setForm(p => {
       const updated = { ...p, Loai_Xe_YC: v };
       // Auto-fill ghi chú if not dirty
-      if (!noteDirty && banggia) {
+      if (banggia) {
         const nccEntry = banggia.nccList?.find(n => n.ten_ncc === p.NCC || n.ncc_id === p.NCC);
         const nccId = nccEntry?.ncc_id || p.NCC;
         const vehicles = banggia.vehiclesByNCC[nccId] || [];
         const match = vehicles.find(veh => veh.display === v);
         if (match) {
-          // Smart format: if fields are short codes (e.g. "VH5", "6m2"), use "Xe VH5 thùng 6m2"
-          // If they're long descriptions, just use the display string
-          if (match.loai_xe.length < 15 && match.kich_thuoc.length < 15 && match.loai_xe && match.kich_thuoc) {
-            updated.Note = `Xe ${match.loai_xe} thùng ${match.kich_thuoc}`;
-          } else {
-            updated.Note = match.display || v;
+          // Auto-fill Đơn Giá NCC from banggia
+          if (match.don_gia) {
+            updated.Don_Gia_NCC = String(match.don_gia);
+          }
+          // Smart format for Note (only if not manually edited)
+          if (!noteDirty) {
+            if (match.loai_xe.length < 15 && match.kich_thuoc.length < 15 && match.loai_xe && match.kich_thuoc) {
+              updated.Note = `Xe ${match.loai_xe} thùng ${match.kich_thuoc}`;
+            } else {
+              updated.Note = match.display || v;
+            }
           }
         }
       }
@@ -344,16 +355,76 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
     });
   };
 
+  // Generate 8-char hex ID for trip
+  const generateHex8 = () => Math.random().toString(16).substring(2, 10);
+
+  // Format date from yyyy-mm-dd to dd/mm/yyyy
+  const toDateVN = (d: string) => {
+    if (!d) return '';
+    const [y, m, dd] = d.split('-');
+    return (y && m && dd) ? `${dd}/${m}/${y}` : d;
+  };
+
   const handleSave = async () => {
+    // ── Validation ──
     if (!form.Dia_Chi_Nhan.trim()) { setErr('Vui lòng nhập điểm nhận hàng'); return; }
     if (!form.Dia_Chi_Giao.trim()) { setErr('Vui lòng nhập điểm giao hàng'); return; }
+    if (!form.NCC.trim()) { setErr('Vui lòng chọn NCC'); return; }
     setSaving(true); setErr('');
+
     try {
-      // In dev mode, simulate success
-      await new Promise(r => setTimeout(r, 700));
-      onSaved();
-    } catch { setErr('Lỗi lưu — vui lòng thử lại'); }
-    finally { setSaving(false); }
+      const chuyenId = generateHex8();
+      const nvUpdate = user ? `${user.maNV} - ${user.hoTen}` : '';
+      // Combine Tai_Xe + SDT for column G
+      const taiXeDisplay = [form.Tai_Xe, form.SDT_Tai_Xe].filter(Boolean).join(' ');
+
+      // ── Build 26-field payload matching 1.Data_Xe_BK A→Z ──
+      const payload = {
+        action          : 'createChuyen',
+        ID_CODE         : bangkeId,                              // A
+        ID              : chuyenId,                              // B
+        Ngay            : toDateVN(form.Ngay),                   // C
+        Booking         : form.Note || '',                       // D (mô tả chuyến)
+        Bien_So         : form.Bien_So,                          // F
+        Tai_Xe          : taiXeDisplay,                          // G
+        Tai_Trong       : form.Tai_Trong || '',                  // H
+        Equipment_Type  : form.Loai_Xe_YC || '',                 // I
+        Diem_Nhan       : form.Dia_Chi_Nhan,                     // J
+        Diem_Giao       : form.Dia_Chi_Giao,                     // K
+        Don_Gia_Doitac  : parseFloat(form.Don_Gia_KH) || 0,      // L
+        Phi_Khac_Doitac : parseFloat(form.Phi_Khac_KH) || 0,     // M
+        Don_Gia_NCC     : parseFloat(form.Don_Gia_NCC) || 0,     // N
+        Phat_Sinh       : parseFloat(form.Phat_Sinh_NCC) || 0,   // O
+        Doi_Tac         : duAn || '',                             // P
+        NCC             : form.NCC,                              // Q
+        Tinh_Trang      : 'Chờ cập nhật',                        // R
+        Note            : form.Note || '',                       // S
+        SVD             : form.So_Bill || '',                     // T
+        Code_Tuyen      : '',                                    // Y
+        NV_Update       : nvUpdate,                              // Z
+      };
+
+      console.log('[AddTrip] Payload:', JSON.stringify(payload).slice(0, 300));
+
+      const res = await fetch('/api/tms/gas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const result = await res.json();
+
+      if (!result.success) {
+        throw new Error(result.error || 'GAS trả về lỗi');
+      }
+
+      console.log('[AddTrip] Success:', result);
+      onSaved(); // refresh parent + close modal
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Lỗi lưu — vui lòng thử lại';
+      setErr(msg);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const isMapUrl = (s: string) => s.includes('maps.app.goo.gl') || s.includes('google.com/maps');
@@ -582,6 +653,37 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
                   fontSize: 12, fontWeight: 700, color: C.orange,
                   border: `1px solid #FBBF24`, background: '#FFF3E0',
                 }}>{form.Trang_Thai}</div>
+              </Field>
+            </div>
+          </div>
+
+          {/* ── THÔNG TIN TÀI CHÍNH ── */}
+          <div>
+            <SectionLabel>💰 Thông tin tài chính</SectionLabel>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 10 }}>
+              <Field label="Tải Trọng (kg)">
+                <input type="number" value={form.Tai_Trong} onChange={setF('Tai_Trong')}
+                  placeholder="0" style={inputStyle()} />
+              </Field>
+              <Field label="Đơn Giá KH">
+                <input type="number" value={form.Don_Gia_KH} onChange={setF('Don_Gia_KH')}
+                  placeholder="VND" style={inputStyle()} />
+              </Field>
+              <Field label="Phí Khác KH">
+                <input type="number" value={form.Phi_Khac_KH} onChange={setF('Phi_Khac_KH')}
+                  placeholder="0" style={inputStyle()} />
+              </Field>
+              <Field label="Đơn Giá NCC" badge={
+                form.Loai_Xe_YC ? (
+                  <span style={{ fontSize: 9, color: '#16A34A', marginLeft: 4 }}>↻ auto</span>
+                ) : undefined
+              }>
+                <input type="number" value={form.Don_Gia_NCC} onChange={setF('Don_Gia_NCC')}
+                  placeholder="VND" style={inputStyle()} />
+              </Field>
+              <Field label="Phát Sinh NCC">
+                <input type="number" value={form.Phat_Sinh_NCC} onChange={setF('Phat_Sinh_NCC')}
+                  placeholder="0" style={inputStyle()} />
               </Field>
             </div>
           </div>
@@ -1070,6 +1172,7 @@ export default function BookingDetailPage() {
           bangkeId={bk.ID_CODE}
           ngay={bk.Ngay}
           diemNhan={parentDiemNhan}
+          duAn={bk.Du_An || bk.Doi_Tac || ''}
           onClose={() => setShowModal(false)}
           onSaved={() => { setShowModal(false); fetchBooking(); }}
         />
