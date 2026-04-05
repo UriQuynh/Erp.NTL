@@ -11,6 +11,19 @@
 export const SPREADSHEET_ID = '1QjelpEElXH-0fxYO4puGA4rwcbhvX4Uc7ucuZqWH9UQ';
 export const TMS_SPREADSHEET_ID = '13WVfTdZD4lzhoEeFINM3TsRmg0cz1DFpQ9Jut1MYP1U';
 
+/**
+ * Normalize Vietnamese diacritics to ASCII-safe keys.
+ * Loại_Xe → Loai_Xe, Kích_Thước → Kich_Thuoc, Đơn_Giá → Don_Gia
+ */
+function safeKeyVN(raw: string): string {
+    return raw
+        .replace(/đ/g, 'd').replace(/Đ/g, 'D')   // đ is NOT a combining character
+        .normalize('NFD')                          // decompose accented chars
+        .replace(/[\u0300-\u036f]/g, '')            // strip combining diacritical marks
+        .replace(/\s+/g, '_')
+        .replace(/[^a-zA-Z0-9_]/g, '');
+}
+
 // Sheet names mapped to their GIDs (for reference in CSV fallback)
 export const SHEET_GIDS: Record<string, number> = {
     'FIle_Luong': 722934013,
@@ -230,10 +243,7 @@ export async function fetchSheet<T = Record<string, string>>(
                 return gvizData.map(row => {
                     const obj: Record<string, string> = {};
                     Object.entries(row).forEach(([key, value]) => {
-                        const safeKey = key
-                            .replace(/\s+/g, '_')
-                            .replace(/[^a-zA-Z0-9_]/g, '');
-                        obj[safeKey] = value;
+                        obj[safeKeyVN(key)] = value;
                     });
                     return obj as T;
                 });
@@ -255,10 +265,7 @@ export async function fetchSheet<T = Record<string, string>>(
         const obj: Record<string, string> = {};
         headers.forEach((header, j) => {
             if (header) {
-                const key = header
-                    .replace(/\s+/g, '_')
-                    .replace(/[^a-zA-Z0-9_]/g, '');
-                obj[key] = row[j] || '';
+                obj[safeKeyVN(header)] = row[j] || '';
             }
         });
         data.push(obj as T);

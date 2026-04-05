@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
 
-        // ── Validate required fields (updated schema: no SDT, no Diem_Giao) ──
+        // ── Validate required fields ──
         const { Du_An, Diem_Nhan, Ngay, Note, NV_Update, ID_CODE, Trong_Luong } = body;
 
         if (!Du_An?.trim()) {
@@ -37,44 +37,42 @@ export async function POST(request: NextRequest) {
         const bangkeId = ID_CODE || ('BANGKE_' + generateSuffix());
         const ngayFormatted = formatDateVN(Ngay || '');
 
-        // ── Compose row matching sheet 1.Data_Xe_PhieuBK ──
-        // Column order: ID | Ngay | Du_An | Diem_Nhan | Tai_Tong | Don_Gia_KH | Don_Gia_NCC | Loi_Nhuan | Note | NV_Update | Trong_Luong
-        const row = [
-            bangkeId,                     // Col 1: ID
-            ngayFormatted,                // Col 2: Ngay
-            Du_An.trim(),                 // Col 3: Du_An
-            Diem_Nhan.trim(),             // Col 4: Diem_Nhan
-            0,                            // Col 5: Tai_Tong (0, computed later from trips)
-            0,                            // Col 6: Don_Gia_KH (computed)
-            0,                            // Col 7: Don_Gia_NCC (computed)
-            0,                            // Col 8: Loi_Nhuan (computed)
-            (Note || '').trim(),          // Col 9: Note
-            NV_Update.trim(),             // Col 10: NV_Update
-            Trong_Luong || '',            // Col 11: Trong_Luong
-        ];
+        // ── Structured payload matching 1.Data_Xe_PhieuBK columns A→K ──
+        const gasPayload = {
+            action: 'createPhieuBK',
+            ID: bangkeId,
+            Ngay: ngayFormatted,
+            Du_An: Du_An.trim(),
+            Diem_Nhan: Diem_Nhan.trim(),
+            Tai_Tong: 0,
+            Don_Gia_KH: 0,
+            Don_Gia_NCC: 0,
+            Loi_Nhuan: 0,
+            Note: (Note || '').trim(),
+            NV_Update: NV_Update.trim(),
+            Trong_Luong: Trong_Luong || '',
+            // Also include rowData array for GAS compatibility
+            sheetName: '1.Data_Xe_PhieuBK',
+            rowData: [
+                bangkeId,
+                ngayFormatted,
+                Du_An.trim(),
+                Diem_Nhan.trim(),
+                0,
+                0,
+                0,
+                0,
+                (Note || '').trim(),
+                NV_Update.trim(),
+                Trong_Luong || '',
+            ],
+        };
 
-        // ── Try GAS webhook first ──
+        // ── Try GAS proxy (server-side, no CORS issues) ──
         const GAS_URL = (process.env.TMS_GAS_URL || '').trim();
 
         if (GAS_URL) {
-            const gasPayload = {
-                action: 'createPhieuBK',
-                sheetName: '1.Data_Xe_PhieuBK',
-                rowData: row,
-                bangkeId,
-                // Also send structured data for GAS to process
-                ID: bangkeId,
-                Ngay: ngayFormatted,
-                Du_An: Du_An.trim(),
-                Diem_Nhan: Diem_Nhan.trim(),
-                Tai_Tong: 0,
-                Don_Gia_KH: 0,
-                Don_Gia_NCC: 0,
-                Loi_Nhuan: 0,
-                Note: (Note || '').trim(),
-                NV_Update: NV_Update.trim(),
-                Trong_Luong: Trong_Luong || '',
-            };
+            console.log(`[CreateBooking] Writing to GAS: ${bangkeId}`);
 
             const gasRes = await fetch(GAS_URL, {
                 method: 'POST',
@@ -84,10 +82,25 @@ export async function POST(request: NextRequest) {
             });
 
             if (!gasRes.ok) {
-                throw new Error(`GAS write failed: ${gasRes.status}`);
+                const errText = await gasRes.text().catch(() => '');
+                throw new Error(`GAS write failed: ${gasRes.status} — ${errText}`);
             }
 
-            const gasData = await gasRes.json();
+            let gasData;
+            try {
+                gasData = await gasRes.json();
+            } catch {
+                // GAS sometimes returns non-JSON on success
+                gasData = { success: true };
+            }
+
+            if (gasData.success === false) {
+                return NextResponse.json({
+                    success: false,
+                    error: gasData.error || 'GAS write thất bại',
+                }, { status: 422 });
+            }
+
             return NextResponse.json({
                 success: true,
                 bangkeId,
@@ -98,51 +111,17 @@ export async function POST(request: NextRequest) {
             });
         }
 
-        // ── Fall back to Google Sheets API v4 ──
-        const SHEETS_KEY = (process.env.GOOGLE_SHEETS_API_KEY || '').trim();
-        const TMS_SHEET_ID = '13WVfTdZD4lzhoEeFINM3TsRmg0cz1DFpQ9Jut1MYP1U';
-
-        if (SHEETS_KEY) {
-            const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${TMS_SHEET_ID}/values/1.Data_Xe_PhieuBK!A:K:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&key=${SHEETS_KEY}`;
-
-            const sheetsRes = await fetch(appendUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ values: [row] }),
-            });
-
-            if (!sheetsRes.ok) {
-                const errText = await sheetsRes.text();
-                throw new Error(`Sheets API error: ${sheetsRes.status} — ${errText}`);
-            }
-
-            return NextResponse.json({
-                success: true,
-                bangkeId,
-                displayId: bangkeId.replace('BANGKE_', 'PXK_'),
-                message: `Tạo Booking ${bangkeId} thành công`,
-                source: 'sheets_api',
-            });
-        }
-
-        // ── Dev mock ──
-        if (process.env.NODE_ENV === 'development') {
-            console.warn('[DEV] No TMS_GAS_URL or GOOGLE_SHEETS_API_KEY configured. Simulating write success.');
-            await new Promise(r => setTimeout(r, 600));
-            return NextResponse.json({
-                success: true,
-                bangkeId,
-                displayId: bangkeId.replace('BANGKE_', 'PXK_'),
-                message: `[DEV] Booking ${bangkeId} simulated`,
-                source: 'dev_mock',
-                rowData: row,
-            });
-        }
-
-        return NextResponse.json(
-            { success: false, error: 'Chưa cấu hình TMS_GAS_URL hoặc GOOGLE_SHEETS_API_KEY' },
-            { status: 503 }
-        );
+        // ── Dev mock (no GAS URL configured) ──
+        console.warn('[DEV] No TMS_GAS_URL configured. Simulating write success.');
+        await new Promise(r => setTimeout(r, 600));
+        return NextResponse.json({
+            success: true,
+            bangkeId,
+            displayId: bangkeId.replace('BANGKE_', 'PXK_'),
+            message: `[DEV] Booking ${bangkeId} simulated`,
+            source: 'dev_mock',
+            payload: gasPayload,
+        });
 
     } catch (error) {
         console.error('Create Booking error:', error);

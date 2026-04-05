@@ -307,7 +307,13 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
         const vehicles = banggia.vehiclesByNCC[nccId] || [];
         const match = vehicles.find(veh => veh.display === v);
         if (match) {
-          updated.Note = `Xe ${match.loai_xe} thùng ${match.kich_thuoc}`;
+          // Smart format: if fields are short codes (e.g. "VH5", "6m2"), use "Xe VH5 thùng 6m2"
+          // If they're long descriptions, just use the display string
+          if (match.loai_xe.length < 15 && match.kich_thuoc.length < 15 && match.loai_xe && match.kich_thuoc) {
+            updated.Note = `Xe ${match.loai_xe} thùng ${match.kich_thuoc}`;
+          } else {
+            updated.Note = match.display || v;
+          }
         }
       }
       return updated;

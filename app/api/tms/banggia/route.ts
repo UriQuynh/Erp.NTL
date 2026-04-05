@@ -5,30 +5,44 @@ export const dynamic = 'force-dynamic';
 
 /**
  * GET /api/tms/banggia
- * Returns Data_Banggia rows grouped by NCC for cascading dropdowns:
- *   - nccList: unique NCCs with vehicle type counts
- *   - banggia: full rows for client-side filtering
- *   - vehiclesByNCC: { NCC_ID → [ { loai_xe, kich_thuoc, don_gia, display } ] }
+ * 
+ * Reads Data_Banggia sheet with ACTUAL columns (after Vietnamese diacritic normalization):
+ *   Ma_BG, NCC_ID, Loai_Xe, Loai_Cuoc, Diem_Nhan, KM_Tu, KM_Den,
+ *   Don_Gia_Chuyen, Gia_Vuot_KM, Tinh_Den, Quan_Den, Don_Gia_Chuyen (dup),
+ *   Luu_Dem, Ghi_Chu, Kich_Thuoc
+ *
+ * Returns: nccList, vehiclesByNCC, banggia rows for cascading dropdowns.
  */
 export async function GET() {
     try {
         const data = await fetchSheet<Record<string, string>>('Data_Banggia', TMS_SPREADSHEET_ID);
 
-        // Map each row to a normalized structure
+        // DEBUG: Log first row keys to confirm field mapping
+        if (data.length > 0) {
+            console.log('[banggia] Sheet columns (sanitized):', Object.keys(data[0]));
+            console.log('[banggia] First row sample:', JSON.stringify(data[0]).slice(0, 300));
+        }
+
+        // Map each row — using ACTUAL sanitized column names
+        // Loại_Xe → Loai_Xe, Kích_Thước → Kich_Thuoc, Đơn_Giá_Chuyến → Don_Gia_Chuyen
         const rows = data
             .filter(r => {
-                // Must have at least NCC identifier
-                const ncc = (r.NCC_ID || r.NCC || r.ncc_id || r.Ten_NCC || '').trim();
+                const ncc = (r.NCC_ID || '').trim();
                 return !!ncc;
             })
             .map(r => ({
-                ncc_id: (r.NCC_ID || r.NCC || r.ncc_id || '').trim(),
-                ten_ncc: (r.Ten_NCC || r.ten_ncc || r.NCC_ID || r.NCC || '').trim(),
-                loai_xe: (r.Loai_Xe || r.loai_xe || '').trim(),
-                kich_thuoc: (r.Kich_Thuoc || r.kich_thuoc || '').trim(),
-                don_gia: parseFloat((r.Don_Gia || r.don_gia || '0').replace(/[,.]/g, '')) || 0,
-                // Display format: "VH5 - 6m2"
-                display: `${(r.Loai_Xe || '').trim()}${(r.Kich_Thuoc || '').trim() ? ' - ' + (r.Kich_Thuoc || '').trim() : ''}`,
+                ncc_id: (r.NCC_ID || '').trim(),
+                ten_ncc: (r.NCC_ID || '').trim(),  // NCC_ID doubles as display name in this sheet
+                loai_xe: (r.Loai_Xe || '').trim(),
+                kich_thuoc: (r.Kich_Thuoc || '').trim(),
+                don_gia: parseFloat((r.Don_Gia_Chuyen || '0').toString().replace(/[,.]/g, '')) || 0,
+                loai_cuoc: (r.Loai_Cuoc || '').trim(),
+                diem_nhan: (r.Diem_Nhan || '').trim(),
+                // Display format: "VH5 - 6m2" or just "Loai_Xe" if no kich_thuoc
+                display: [
+                    (r.Loai_Xe || '').trim(),
+                    (r.Kich_Thuoc || '').trim(),
+                ].filter(Boolean).join(' - ') || (r.Loai_Cuoc || '').trim() || '—',
             }));
 
         // Build unique NCC list
@@ -41,11 +55,12 @@ export async function GET() {
         });
         const nccList = Array.from(nccMap.values()).sort((a, b) => a.ten_ncc.localeCompare(b.ten_ncc));
 
-        // Build vehicles-by-NCC map
+        // Build vehicles-by-NCC map (only rows with loai_xe or loai_cuoc)
         const vehiclesByNCC: Record<string, Array<{
             loai_xe: string; kich_thuoc: string; don_gia: number; display: string;
         }>> = {};
         rows.forEach(r => {
+            if (!r.loai_xe && !r.kich_thuoc) return; // skip rows without vehicle info
             if (!vehiclesByNCC[r.ncc_id]) vehiclesByNCC[r.ncc_id] = [];
             // Deduplicate by display string
             if (!vehiclesByNCC[r.ncc_id].some(v => v.display === r.display)) {
@@ -61,7 +76,8 @@ export async function GET() {
         return NextResponse.json({
             success: true,
             data: { nccList, banggia: rows, vehiclesByNCC },
-            counts: { ncc: nccList.length, rows: rows.length },
+            counts: { ncc: nccList.length, rows: rows.length, vehicleTypes: Object.values(vehiclesByNCC).flat().length },
+            _debug: { sampleKeys: data.length > 0 ? Object.keys(data[0]) : [] },
         });
     } catch (error) {
         console.error('[API/tms/banggia] Error:', error);
