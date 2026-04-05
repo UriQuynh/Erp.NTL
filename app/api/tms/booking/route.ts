@@ -37,16 +37,22 @@ export async function GET(request: NextRequest) {
             });
         });
 
-        // Map parent bookings
-        const bookings = phieuData.map(phieu => {
+        // Map parent bookings — deduplicate by ID to prevent duplicate React keys
+        const bookingMap = new Map<string, any>();
+        
+        phieuData.forEach(phieu => {
             const parentId = phieu.ID;
+            if (!parentId || parentId.trim() === '') return; // Skip empty rows
+            
+            // If we already processed this ID, skip (first occurrence wins for metadata)
+            if (bookingMap.has(parentId)) return;
+            
             const trips = tripsByBooking[parentId] || [];
 
             // Aggregate NCC (usually from trips if not in parent, but let's grab from first trip if available)
             const ncc = trips.find(t => t.NCC)?.NCC || 'Chưa xác định';
             
             // Determine combined status
-            // If all trips completed -> Hoàn thành. If some in progress -> Đang vận chuyển. Else -> Chưa thực hiện
             let trangThai = 'Chưa thực hiện';
             if (trips.length > 0) {
                 const completeCount = trips.filter(t => t.Trang_Thai === 'Hoàn thành' || t.Trang_Thai === 'Đã hoàn thành').length;
@@ -60,7 +66,7 @@ export async function GET(request: NextRequest) {
             // Get Vehicle Type from first trip
             const loaiXe = trips.length > 0 ? (trips[0].Loai_Xe || trips[0].Loai_xe_YC || 'Chưa xác định') : 'Chưa xác định';
 
-            return {
+            bookingMap.set(parentId, {
                 ID_PXK: parentId,
                 Du_An: phieu.Du_An || 'Không xác định',
                 NCC: ncc,
@@ -71,11 +77,10 @@ export async function GET(request: NextRequest) {
                 Ghi_Chu: phieu.Note || '',
                 Nguoi_Tao: phieu.NV_Update || 'Hệ thống',
                 trips: trips
-            };
+            });
         });
 
-        // Filter out empty rows (sometimes gviz returns empty rows)
-        const validBookings = bookings.filter(b => b.ID_PXK && b.ID_PXK.trim() !== '');
+        const validBookings = Array.from(bookingMap.values());
 
         return NextResponse.json({
             success: true,

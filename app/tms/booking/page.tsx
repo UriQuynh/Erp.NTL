@@ -180,7 +180,7 @@ export default function BookingPage() {
             const doneTrips = booking.trips.filter((t: any) => t.Trang_Thai === 'Hoàn thành' || t.Trang_Thai === 'Đã hoàn thành').length;
 
             return (
-              <div key={booking.ID_PXK} className="glass-card rounded-2xl overflow-hidden animate-fade-in" style={{ animationDelay: `${idx * 30}ms` }}>
+              <div key={`${booking.ID_PXK}_${idx}`} className="glass-card rounded-2xl overflow-hidden animate-fade-in" style={{ animationDelay: `${idx * 30}ms` }}>
                 {/* Booking Header */}
                 <div className="p-4 flex items-center gap-3 cursor-pointer hover:bg-slate-50/50 transition-all" onClick={() => toggleExpand(booking.ID_PXK)}>
                   <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: 'linear-gradient(135deg, #FFD100, #D97706)' }}>
