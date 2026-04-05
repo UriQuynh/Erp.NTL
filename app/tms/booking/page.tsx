@@ -4,488 +4,571 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useERPAuth } from '@/lib/auth';
 import {
-  Plus, Search, Truck, Eye, X, ChevronDown, ChevronRight, MapPin,
-  Calendar, Hash, Download, RefreshCw, Package, ArrowRight, Clock,
-  FileText, TrendingUp, AlertCircle, Image, User, ExternalLink
+  Plus, Search, Truck, RefreshCw, Download, FileSpreadsheet,
+  Copy, Trash2, ChevronRight, Calendar, TrendingUp, TrendingDown,
+  AlertCircle, Clock, CheckCircle, BarChart2,
 } from 'lucide-react';
 
-// ─── Status config matching actual sheet values ───
-const STATUS_MAP: Record<string, { label: string; color: string; bg: string; border: string }> = {
-  'Chưa Có Xe':    { label: 'Chưa Có Xe',    color: '#DC2626', bg: '#FEF2F2', border: '#FECACA' },
-  'Chưa Hòa Tất':  { label: 'Chưa Hoàn Tất', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A' },
-  'Hoàn Tất':      { label: 'Hoàn Tất',      color: '#059669', bg: '#ECFDF5', border: '#A7F3D0' },
+// ─── Design tokens ───
+const CLR = {
+  primary: '#1E3A5F',
+  gold: '#F5A623',
+  yellow: '#F5C518',
+  green: '#27AE60',
+  red: '#E74C3C',
+  orange: '#E67E22',
+  bg: '#F0F2F5',
+  card: '#FFFFFF',
+  border: '#E8ECF0',
+  text: '#1A1A2E',
+  muted: '#9CA3AF',
+  secondary: '#6B7280',
 };
-const DEFAULT_STATUS = { label: 'Không rõ', color: '#6B7280', bg: '#F9FAFB', border: '#E5E7EB' };
 
+const STATUS_CFG: Record<string, { label: string; color: string; bg: string; border: string }> = {
+  'Chưa Có Xe':   { label: 'Chưa Có Xe',   color: '#DC2626', bg: '#FEF2F2', border: '#FCA5A5' },
+  'Chưa Hòa Tất': { label: 'Chưa Hoàn Tất', color: '#2563EB', bg: '#EFF6FF', border: '#93C5FD' },
+  'Hoàn Tất':     { label: 'Hoàn Tất',      color: '#16A34A', bg: '#F0FDF4', border: '#86EFAC' },
+};
 function getStatus(s: string) {
-  if (!s) return DEFAULT_STATUS;
-  const key = Object.keys(STATUS_MAP).find(k => s.trim().toLowerCase().includes(k.toLowerCase()));
-  return key ? STATUS_MAP[key] : DEFAULT_STATUS;
+  if (!s) return { label: 'Không rõ', color: CLR.muted, bg: '#F9FAFB', border: '#E5E7EB' };
+  const k = Object.keys(STATUS_CFG).find(k => s.includes(k));
+  return k ? STATUS_CFG[k] : { label: s, color: CLR.muted, bg: '#F9FAFB', border: '#E5E7EB' };
 }
 
-function fmtVND(n: number): string {
-  if (!n) return '0';
+function fmtCompact(n: number) {
+  if (!n) return '—';
   if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (Math.abs(n) >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
   return n.toLocaleString('vi-VN');
 }
-
-function fmtFullVND(n: number): string {
-  return n.toLocaleString('vi-VN') + '₫';
+function fmtFull(n: number) {
+  return n.toLocaleString('vi-VN');
 }
 
-// ─── Types ───
-interface Trip {
-  ID: string;
-  ID_PXK: string;
-  Bien_So: string;
-  Tai_Xe: string;
-  Trong_Luong: string;
-  Loai_Xe: string;
-  Dia_Chi_Nhan: string;
-  Dia_Chi_Giao: string;
-  Loai_Hang: string;
-  So_Bill: string;
-  Cuoc_Thu_KH: number;
-  Cuoc_Khac_Thu_KH: number;
-  Don_Gia_NCC: number;
-  Phi_Khac_NCC: number;
-  NCC_Raw: string;
-  NCC: string;
-  Trang_Thai: string;
-  Nguoi_YC: string;
-  Code: string;
-  Tuyen: string;
-  Thoi_Gian_BK: string;
-  Thoi_Gian_Den: string;
-  Thoi_Gian_DenKho: string;
-  PODs: string[];
-  Tong_Thu: number;
-  Tong_Tra: number;
-  Profit: number;
-}
-
-interface BookingData {
+interface BookingRow {
   ID_CODE: string;
   Ngay: string;
   Du_An: string;
   Doi_Tac: string;
   Tinh_Trang: string;
   NV_Update: string;
-  NV_MaNV: string;
   NV_HoTen: string;
   Note: string;
-  PODs: string[];
   So_Chuyen: number;
   Tong_Thu: number;
   Tong_Tra_NCC: number;
-  Tong_Phat_Sinh: number;
   Profit: number;
   NCCs: string[];
-  trips: Trip[];
+  trips: { Trong_Luong?: string; Loai_Xe?: string; Dia_Chi_Nhan?: string; Don_Gia_NCC?: number }[];
 }
 
-export default function BookingPage() {
-  const { isAuthenticated } = useERPAuth();
+// Day quick filters
+const DAY_FILTERS = [
+  { key: 'today', label: 'Hôm nay', days: 0 },
+  { key: '3d', label: '3 ngày', days: 3 },
+  { key: '7d', label: '7 ngày', days: 7 },
+  { key: '30d', label: '30 ngày', days: 30 },
+  { key: 'month', label: 'Tháng này', days: -1 },
+  { key: 'all', label: 'Tất cả', days: -2 },
+];
+
+function parseVNDate(s: string): Date | null {
+  if (!s) return null;
+  // Support dd/mm/yyyy and yyyy-mm-dd
+  const parts = s.includes('/') ? s.split('/') : s.split('-');
+  if (parts.length !== 3) return null;
+  const [a, b, c] = parts.map(Number);
+  if (s.includes('/')) return new Date(c, b - 1, a); // dd/mm/yyyy
+  return new Date(a, b - 1, c); // yyyy-mm-dd
+}
+function formatDateVN(d: Date) {
+  return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+}
+
+export default function BookingListPage() {
   const router = useRouter();
-  const [bookings, setBookings] = useState<BookingData[]>([]);
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [expandedBooking, setExpandedBooking] = useState<string | null>(null);
-  const [selectedBooking, setSelectedBooking] = useState<BookingData | null>(null);
+  const { isAuthenticated } = useERPAuth();
+
+  const [bookings, setBookings] = useState<BookingRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [dayFilter, setDayFilter] = useState('3d');
+  const [selectedDate, setSelectedDate] = useState<string | null>(null); // from sidebar
+  const [statusFilter, setStatusFilter] = useState('');
+  const [copied, setCopied] = useState<string | null>(null);
 
-  const fetchBookings = useCallback(async () => {
-    setLoading(true);
-    setError('');
+  const fetchData = useCallback(async () => {
+    setLoading(true); setError('');
     try {
       const res = await fetch('/api/tms/booking');
       const json = await res.json();
-      if (json.success) {
-        setBookings(json.data || []);
-      } else {
-        setError(json.error || 'Lỗi tải dữ liệu');
-      }
-    } catch {
-      setError('Không kết nối được server');
-    } finally {
-      setLoading(false);
-    }
+      if (json.success) setBookings(json.data || []);
+      else setError(json.error || 'Lỗi tải dữ liệu');
+    } catch { setError('Không kết nối được server'); }
+    finally { setLoading(false); }
   }, []);
 
-  useEffect(() => {
-    if (isAuthenticated) fetchBookings();
-  }, [isAuthenticated, fetchBookings]);
+  useEffect(() => { if (isAuthenticated) fetchData(); }, [isAuthenticated, fetchData]);
 
-  // ─── Filter ───
+  // ─── Date sidebar groups ───
+  const dateCounts = useMemo(() => {
+    const map: Record<string, number> = {};
+    bookings.forEach(b => {
+      const d = parseVNDate(b.Ngay);
+      if (d) {
+        const k = formatDateVN(d);
+        map[k] = (map[k] || 0) + 1;
+      }
+    });
+    return Object.entries(map).sort((a, b) => {
+      const da = parseVNDate(a[0])!, db = parseVNDate(b[0])!;
+      return db.getTime() - da.getTime();
+    });
+  }, [bookings]);
+
+  // ─── Apply filters ───
   const filtered = useMemo(() => {
+    const now = new Date(); now.setHours(0, 0, 0, 0);
     return bookings.filter(b => {
-      if (statusFilter && !b.Tinh_Trang.toLowerCase().includes(statusFilter.toLowerCase())) return false;
+      // Day filter from sidebar
+      if (selectedDate) {
+        const d = parseVNDate(b.Ngay);
+        if (!d || formatDateVN(d) !== selectedDate) return false;
+      } else {
+        // Quick filter
+        const d = parseVNDate(b.Ngay);
+        if (dayFilter !== 'all') {
+          if (!d) return false;
+          if (dayFilter === 'today') {
+            if (d.toDateString() !== now.toDateString()) return false;
+          } else if (dayFilter === 'month') {
+            if (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear()) return false;
+          } else {
+            const days = DAY_FILTERS.find(f => f.key === dayFilter)?.days || 7;
+            const cutoff = new Date(now); cutoff.setDate(cutoff.getDate() - days);
+            if (d < cutoff || d > now) return false;
+          }
+        }
+      }
+      // Status filter
+      if (statusFilter && !b.Tinh_Trang.includes(statusFilter)) return false;
+      // Search
       if (search) {
-        const s = search.toLowerCase();
-        const inH = b.ID_CODE.toLowerCase().includes(s) ||
-          b.Doi_Tac.toLowerCase().includes(s) ||
-          b.Note.toLowerCase().includes(s) ||
-          (b.NV_HoTen || '').toLowerCase().includes(s);
-        const inT = b.trips.some(t =>
-          t.Bien_So.toLowerCase().includes(s) ||
-          t.Tai_Xe.toLowerCase().includes(s) ||
-          t.NCC.toLowerCase().includes(s) ||
-          t.Dia_Chi_Nhan.toLowerCase().includes(s) ||
-          t.Dia_Chi_Giao.toLowerCase().includes(s) ||
-          (t.Code || '').toLowerCase().includes(s) ||
-          (t.Tuyen || '').toLowerCase().includes(s)
-        );
-        if (!inH && !inT) return false;
+        const q = search.toLowerCase();
+        const match = b.ID_CODE.toLowerCase().includes(q) ||
+          (b.Doi_Tac || b.Du_An || '').toLowerCase().includes(q) ||
+          (b.NV_HoTen || b.NV_Update || '').toLowerCase().includes(q) ||
+          (b.Note || '').toLowerCase().includes(q);
+        if (!match) return false;
       }
       return true;
     });
-  }, [bookings, search, statusFilter]);
+  }, [bookings, dayFilter, selectedDate, statusFilter, search]);
 
   // ─── Stats ───
-  const stats = useMemo(() => {
-    const total = bookings.length;
-    const totalTrips = bookings.reduce((s, b) => s + b.So_Chuyen, 0);
-    const chuaCoXe = bookings.filter(b => b.Tinh_Trang.includes('Chưa Có Xe')).length;
-    const chuaHoanTat = bookings.filter(b => b.Tinh_Trang.includes('Chưa Hòa Tất')).length;
-    const hoanTat = bookings.filter(b => b.Tinh_Trang.includes('Hoàn Tất')).length;
-    const tongThu = bookings.reduce((s, b) => s + b.Tong_Thu, 0);
-    const tongProfit = bookings.reduce((s, b) => s + b.Profit, 0);
-    return { total, totalTrips, chuaCoXe, chuaHoanTat, hoanTat, tongThu, tongProfit };
-  }, [bookings]);
+  const stats = useMemo(() => ({
+    total: filtered.length,
+    chuyen: filtered.reduce((s, b) => s + b.So_Chuyen, 0),
+    thu: filtered.reduce((s, b) => s + b.Tong_Thu, 0),
+    profit: filtered.reduce((s, b) => s + b.Profit, 0),
+    chuaCoXe: filtered.filter(b => b.Tinh_Trang.includes('Chưa Có Xe')).length,
+    hoanTat: filtered.filter(b => b.Tinh_Trang.includes('Hoàn Tất')).length,
+  }), [filtered]);
 
-  const toggleExpand = (id: string) => setExpandedBooking(prev => prev === id ? null : id);
+  const handleCopy = async (id: string) => {
+    await navigator.clipboard.writeText(id);
+    setCopied(id);
+    setTimeout(() => setCopied(null), 1200);
+  };
 
   if (!isAuthenticated) return null;
 
-  // ═══════ DETAIL VIEW ═══════
-  if (selectedBooking) {
-    const bk = selectedBooking;
-    const st = getStatus(bk.Tinh_Trang);
-    return (
-      <div className="space-y-5 max-w-[1400px] mx-auto animate-fade-in">
-        {/* Header */}
-        <div className="flex items-center gap-3 mb-2">
-          <button onClick={() => setSelectedBooking(null)} className="w-9 h-9 flex items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-all active:scale-95">
-            <ChevronRight size={16} className="rotate-180" />
-          </button>
-          <div className="flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-xl font-extrabold text-slate-800 font-mono">{bk.ID_CODE}</h1>
-              <span className="inline-flex items-center px-2.5 py-1 rounded-lg text-[11px] font-bold border" style={{ color: st.color, background: st.bg, borderColor: st.border }}>{st.label}</span>
-            </div>
-            <p className="text-sm text-slate-500 mt-0.5">{bk.Doi_Tac} • {bk.Ngay} • {bk.So_Chuyen} chuyến</p>
-          </div>
-          <button onClick={() => setSelectedBooking(null)} className="h-9 px-4 text-sm font-medium text-slate-600 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 active:scale-95 transition-all">Đóng</button>
-        </div>
-
-        {/* Info Grid */}
-        <div className="glass-card rounded-2xl p-5">
-          <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Thông tin phiếu</h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {[
-              { label: 'Đối tác/Dự án', value: bk.Doi_Tac || '—', icon: <Package size={14} /> },
-              { label: 'Ngày BK', value: bk.Ngay || '—', icon: <Calendar size={14} /> },
-              { label: 'NV Phụ trách', value: bk.NV_HoTen || bk.NV_Update || '—', icon: <User size={14} /> },
-              { label: 'NCC', value: bk.NCCs.join(', ') || '—', icon: <Truck size={14} /> },
-            ].map((f, i) => (
-              <div key={i} className="p-3 bg-slate-50/80 rounded-xl">
-                <div className="flex items-center gap-1.5 text-slate-400 mb-1">{f.icon}<span className="text-[11px] font-semibold uppercase tracking-wider">{f.label}</span></div>
-                <p className="text-sm font-semibold text-slate-700 truncate">{f.value}</p>
-              </div>
-            ))}
-          </div>
-          {bk.Note && (
-            <div className="mt-4 p-3 bg-amber-50/60 rounded-xl border border-amber-100">
-              <span className="text-[11px] font-semibold text-amber-600 uppercase tracking-wider">Ghi chú</span>
-              <p className="text-sm text-slate-700 mt-1 whitespace-pre-wrap">{bk.Note}</p>
-            </div>
-          )}
-        </div>
-
-        {/* Financial Summary */}
-        <div className="glass-card rounded-2xl p-5">
-          <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Tài chính phiếu</h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {[
-              { label: 'Tổng thu KH', value: fmtFullVND(bk.Tong_Thu), color: '#059669', bg: '#ECFDF5' },
-              { label: 'Tổng trả NCC', value: fmtFullVND(bk.Tong_Tra_NCC), color: '#DC2626', bg: '#FEF2F2' },
-              { label: 'Phát sinh NCC', value: fmtFullVND(bk.Tong_Phat_Sinh), color: '#D97706', bg: '#FFFBEB' },
-              { label: 'Lãi/Lỗ', value: fmtFullVND(bk.Profit), color: bk.Profit >= 0 ? '#059669' : '#DC2626', bg: bk.Profit >= 0 ? '#ECFDF5' : '#FEF2F2' },
-            ].map((f, i) => (
-              <div key={i} className="p-3 rounded-xl" style={{ background: f.bg }}>
-                <p className="text-[11px] font-semibold text-slate-500 uppercase">{f.label}</p>
-                <p className="text-base font-extrabold mt-0.5" style={{ color: f.color }}>{f.value}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* POD Section */}
-        {bk.PODs.length > 0 && (
-          <div className="glass-card rounded-2xl p-5">
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-1.5"><Image size={14} /> Bằng chứng giao hàng (POD)</h3>
-            <div className="flex gap-3 flex-wrap">
-              {bk.PODs.map((pod, i) => (
-                <a key={i} href={pod} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-3 py-2 bg-sky-50 border border-sky-200 rounded-xl text-xs font-medium text-sky-700 hover:bg-sky-100 transition-all">
-                  <Image size={14} /> POD {i + 1} <ExternalLink size={12} />
-                </a>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Trips Table */}
-        <div className="glass-card rounded-2xl overflow-hidden">
-          <div className="px-5 py-3 bg-slate-50/60 border-b border-slate-100 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2"><Truck size={16} className="text-amber-500" /> Danh sách chuyến xe ({bk.trips.length})</h3>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-100 bg-slate-50/30">
-                  {['#', 'ID', 'Biển số', 'Tài xế', 'Loại xe', 'Điểm nhận', 'Điểm giao', 'Thu KH', 'PS KH', 'Trả NCC', 'PS NCC', 'Lãi/Lỗ', 'NCC', 'Trạng thái'].map(h => (
-                    <th key={h} className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {bk.trips.map((trip, i) => {
-                  const tst = getStatus(trip.Trang_Thai);
-                  return (
-                    <tr key={`${trip.ID}_${i}`} className="border-b border-slate-50 hover:bg-sky-50/30 transition-colors">
-                      <td className="px-3 py-2.5 text-xs text-slate-400 font-bold">{i + 1}</td>
-                      <td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{trip.ID}</td>
-                      <td className="px-3 py-2.5"><span className="font-mono text-xs font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded">{trip.Bien_So}</span></td>
-                      <td className="px-3 py-2.5 text-xs text-slate-600 max-w-[120px] truncate">{trip.Tai_Xe}</td>
-                      <td className="px-3 py-2.5"><span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded-md">{trip.Loai_Xe || '—'}</span></td>
-                      <td className="px-3 py-2.5 max-w-[180px]"><div className="flex items-center gap-1"><MapPin size={11} className="text-emerald-500 flex-shrink-0" /><span className="text-xs text-slate-600 truncate">{trip.Dia_Chi_Nhan || '—'}</span></div></td>
-                      <td className="px-3 py-2.5 max-w-[180px]"><div className="flex items-center gap-1"><MapPin size={11} className="text-red-500 flex-shrink-0" /><span className="text-xs text-slate-600 truncate">{trip.Dia_Chi_Giao || '—'}</span></div></td>
-                      <td className="px-3 py-2.5 text-xs font-semibold text-emerald-600 whitespace-nowrap">{trip.Cuoc_Thu_KH ? fmtFullVND(trip.Cuoc_Thu_KH) : '—'}</td>
-                      <td className="px-3 py-2.5 text-xs text-amber-600 whitespace-nowrap">{trip.Cuoc_Khac_Thu_KH ? fmtFullVND(trip.Cuoc_Khac_Thu_KH) : '—'}</td>
-                      <td className="px-3 py-2.5 text-xs font-semibold text-red-600 whitespace-nowrap">{trip.Don_Gia_NCC ? fmtFullVND(trip.Don_Gia_NCC) : '—'}</td>
-                      <td className="px-3 py-2.5 text-xs text-orange-600 whitespace-nowrap">{trip.Phi_Khac_NCC ? fmtFullVND(trip.Phi_Khac_NCC) : '—'}</td>
-                      <td className="px-3 py-2.5 text-xs font-bold whitespace-nowrap" style={{ color: trip.Profit >= 0 ? '#059669' : '#DC2626' }}>{fmtFullVND(trip.Profit)}</td>
-                      <td className="px-3 py-2.5 text-xs text-slate-600 max-w-[120px] truncate" title={trip.NCC_Raw}>{trip.NCC || '—'}</td>
-                      <td className="px-3 py-2.5"><span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border" style={{ color: tst.color, background: tst.bg, borderColor: tst.border }}>{tst.label}</span></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot>
-                <tr className="bg-gradient-to-r from-amber-50 to-orange-50 border-t-2 border-amber-200">
-                  <td colSpan={7} className="px-3 py-3 text-xs font-bold text-slate-600 uppercase">Tổng cộng ({bk.trips.length} chuyến)</td>
-                  <td className="px-3 py-3 text-xs font-extrabold text-emerald-700 whitespace-nowrap">{fmtFullVND(bk.Tong_Thu)}</td>
-                  <td className="px-3 py-3"></td>
-                  <td className="px-3 py-3 text-xs font-extrabold text-red-700 whitespace-nowrap">{fmtFullVND(bk.trips.reduce((s, t) => s + t.Don_Gia_NCC, 0))}</td>
-                  <td className="px-3 py-3 text-xs font-extrabold text-orange-700 whitespace-nowrap">{fmtFullVND(bk.Tong_Phat_Sinh)}</td>
-                  <td className="px-3 py-3 text-xs font-extrabold whitespace-nowrap" style={{ color: bk.Profit >= 0 ? '#059669' : '#DC2626' }}>{fmtFullVND(bk.Profit)}</td>
-                  <td colSpan={2}></td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ═══════ LIST VIEW ═══════
   return (
-    <div className="space-y-5 max-w-[1400px] mx-auto animate-fade-in">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-800 tracking-tight flex items-center gap-2">
-            <Truck className="text-amber-500" size={24} /> Điều phối Booking
-          </h1>
-          <p className="text-sm text-slate-500 mt-0.5">{stats.total} phiếu • {stats.totalTrips} chuyến • Thu: {fmtVND(stats.tongThu)}</p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={fetchBookings} disabled={loading} className="h-9 px-3 flex items-center gap-1.5 text-sm font-medium border border-slate-200 rounded-xl bg-white text-slate-600 hover:bg-slate-50 transition-all active:scale-95">
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-            <span className="hidden sm:inline">{loading ? 'Đang tải...' : 'Sync'}</span>
-          </button>
-          <button className="h-9 px-3 flex items-center gap-1.5 text-sm font-medium border border-slate-200 rounded-xl bg-white text-slate-600 hover:bg-slate-50 transition-all active:scale-95">
-            <Download size={14} /> <span className="hidden sm:inline">Xuất Excel</span>
-          </button>
-          <button onClick={() => router.push('/tms/booking/create')} className="h-9 px-4 flex items-center gap-2 text-sm font-semibold text-white rounded-xl transition-all shadow-lg active:scale-95" style={{ background: 'linear-gradient(135deg, #D97706, #B45309)', boxShadow: '0 4px 16px rgba(217,119,6,0.3)' }}>
-            <Plus size={14} /> <span className="hidden sm:inline">Tạo Booking mới</span>
-          </button>
-        </div>
-      </div>
+    <div style={{ display: 'flex', height: 'calc(100vh - 120px)', overflow: 'hidden', gap: 0, background: CLR.bg }}>
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        {[
-          { label: 'Tổng phiếu', value: stats.total, icon: <FileText size={18} />, color: '#1D354D', bg: '#F0F4F8' },
-          { label: 'Chưa Có Xe', value: stats.chuaCoXe, icon: <AlertCircle size={18} />, color: '#DC2626', bg: '#FEF2F2' },
-          { label: 'Chưa Hoàn Tất', value: stats.chuaHoanTat, icon: <Clock size={18} />, color: '#D97706', bg: '#FFFBEB' },
-          { label: 'Hoàn Tất', value: stats.hoanTat, icon: <Package size={18} />, color: '#059669', bg: '#ECFDF5' },
-          { label: 'Lãi/Lỗ', value: fmtVND(stats.tongProfit), icon: <TrendingUp size={18} />, color: stats.tongProfit >= 0 ? '#059669' : '#DC2626', bg: stats.tongProfit >= 0 ? '#ECFDF5' : '#FEF2F2' },
-        ].map((s, i) => (
-          <div key={i} className="glass-card rounded-xl p-4 flex items-center gap-3 animate-fade-in" style={{ animationDelay: `${i * 50}ms` }}>
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: s.bg, color: s.color }}>{s.icon}</div>
-            <div>
-              <p className="text-[11px] text-slate-500 font-medium">{s.label}</p>
-              <p className="text-lg font-extrabold" style={{ color: s.color }}>{s.value}</p>
+      {/* ── DATE SIDEBAR ── */}
+      <aside style={{
+        width: 188, flexShrink: 0, background: '#F8F9FB',
+        borderRight: `1px solid ${CLR.border}`, overflowY: 'auto', padding: '12px 0'
+      }}>
+        <div style={{ padding: '0 12px 8px', fontSize: 12, fontWeight: 700, color: CLR.text, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+          Ngày
+        </div>
+        <div style={{ borderBottom: `1px solid ${CLR.border}`, marginBottom: 4 }} />
+
+        {/* "All" row */}
+        <button
+          onClick={() => { setSelectedDate(null); setDayFilter('all'); }}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            width: '100%', padding: '8px 14px', fontSize: 13, fontWeight: selectedDate === null && dayFilter === 'all' ? 700 : 400,
+            color: selectedDate === null && dayFilter === 'all' ? CLR.primary : CLR.text,
+            background: selectedDate === null && dayFilter === 'all' ? '#EEF2FF' : 'transparent',
+            border: 'none', cursor: 'pointer', textAlign: 'left',
+          }}
+        >
+          <span>Tất cả</span>
+          <span style={{
+            fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 10,
+            background: '#E8ECF0', color: CLR.secondary
+          }}>{bookings.length}</span>
+        </button>
+
+        {dateCounts.map(([date, count]) => {
+          const active = selectedDate === date;
+          return (
+            <button
+              key={date}
+              onClick={() => { setSelectedDate(active ? null : date); setDayFilter('all'); }}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                width: '100%', padding: '8px 14px', fontSize: 12.5, fontWeight: active ? 700 : 400,
+                color: active ? CLR.primary : CLR.text,
+                background: active ? '#EEF2FF' : 'transparent',
+                border: 'none', cursor: 'pointer', textAlign: 'left',
+                transition: 'background 0.12s',
+              }}
+              onMouseEnter={e => { if (!active) (e.currentTarget as HTMLElement).style.background = '#F0F4FF'; }}
+              onMouseLeave={e => { if (!active) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+            >
+              <span>{date}</span>
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: '1px 6px', borderRadius: 10,
+                background: active ? CLR.primary : '#E8ECF0',
+                color: active ? '#fff' : CLR.secondary
+              }}>{count}</span>
+            </button>
+          );
+        })}
+      </aside>
+
+      {/* ── MAIN CONTENT ── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+        {/* ── TOOLBAR ── */}
+        <div style={{
+          padding: '10px 20px', background: CLR.card, borderBottom: `1px solid ${CLR.border}`,
+          display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, flexWrap: 'wrap'
+        }}>
+          {/* Day filter pills */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Calendar size={14} color={CLR.secondary} style={{ marginRight: 2 }} />
+            {DAY_FILTERS.map(f => {
+              const active = !selectedDate && dayFilter === f.key;
+              return (
+                <button
+                  key={f.key}
+                  onClick={() => { setDayFilter(f.key); setSelectedDate(null); }}
+                  style={{
+                    height: 30, padding: '0 10px', fontSize: 12, fontWeight: active ? 700 : 500,
+                    borderRadius: 6, border: active ? 'none' : `1px solid ${CLR.border}`,
+                    background: active ? CLR.primary : CLR.card, color: active ? '#fff' : CLR.secondary,
+                    cursor: 'pointer', transition: 'all 0.12s', letterSpacing: '0.01em',
+                  }}
+                >{f.label}</button>
+              );
+            })}
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          {/* Right: count + actions */}
+          <span style={{ fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 14, background: '#F3F4F6', color: CLR.secondary }}>
+            {stats.chuyen} chuyến
+          </span>
+          <button onClick={fetchData} disabled={loading} style={{
+            display: 'flex', alignItems: 'center', gap: 5, height: 34, padding: '0 12px',
+            fontSize: 12, fontWeight: 600, borderRadius: 7, border: `1px solid ${CLR.border}`,
+            background: CLR.card, color: CLR.secondary, cursor: 'pointer',
+          }}>
+            <RefreshCw size={13} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
+            Refresh
+          </button>
+          <button style={{
+            display: 'flex', alignItems: 'center', gap: 5, height: 34, padding: '0 12px',
+            fontSize: 12, fontWeight: 600, borderRadius: 7, border: `1px solid ${CLR.border}`,
+            background: CLR.card, color: CLR.secondary, cursor: 'pointer',
+          }}>
+            <Download size={13} />
+            Excel
+          </button>
+          <button style={{
+            display: 'flex', alignItems: 'center', gap: 5, height: 34, padding: '0 12px',
+            fontSize: 12, fontWeight: 600, borderRadius: 7, border: `1px solid ${CLR.border}`,
+            background: CLR.card, color: CLR.secondary, cursor: 'pointer',
+          }}>
+            <BarChart2 size={13} />
+            Bảng Kê
+          </button>
+          <button
+            onClick={() => router.push('/tms/booking/create')}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, height: 34, padding: '0 14px',
+              fontSize: 12, fontWeight: 700, borderRadius: 7, border: 'none',
+              background: CLR.primary, color: '#fff', cursor: 'pointer',
+              boxShadow: '0 2px 8px rgba(30,58,95,0.25)',
+            }}
+          >
+            <Plus size={14} />
+            Tạo Booking
+          </button>
+        </div>
+
+        {/* ── SUMMARY STAT BAR ── */}
+        <div style={{
+          padding: '6px 20px', background: '#FFFCF0', borderBottom: `1px solid ${CLR.border}`,
+          display: 'flex', gap: 24, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap'
+        }}>
+          {[
+            { label: 'Tổng Phiếu', value: stats.total, icon: <FileSpreadsheet size={13} />, color: CLR.primary },
+            { label: 'Chưa Có Xe', value: stats.chuaCoXe, icon: <AlertCircle size={13} />, color: '#DC2626' },
+            { label: 'Hoàn Tất', value: stats.hoanTat, icon: <CheckCircle size={13} />, color: '#16A34A' },
+            { label: 'Tổng Thu', value: fmtCompact(stats.thu), icon: <TrendingUp size={13} />, color: '#16A34A' },
+            { label: 'Lợi Nhuận', value: fmtCompact(stats.profit), icon: stats.profit >= 0 ? <TrendingUp size={13} /> : <TrendingDown size={13} />, color: stats.profit >= 0 ? '#16A34A' : '#DC2626' },
+          ].map((s, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: s.color }}>{s.icon}</span>
+              <span style={{ fontSize: 11, color: CLR.secondary, fontWeight: 500 }}>{s.label}:</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: s.color }}>{s.value}</span>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
 
-      {/* Error */}
-      {error && (
-        <div className="flex items-center gap-2 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
-          <AlertCircle size={16} /> {error}
-        </div>
-      )}
-
-      {/* Search & Filters */}
-      <div className="glass-card rounded-2xl">
-        <div className="p-3 sm:p-4 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
-          <div className="relative flex-1">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Tìm ID, đối tác, biển số, tài xế, NCC, tuyến..."
-              className="w-full h-10 pl-9 pr-4 text-sm bg-slate-50/80 border border-slate-200/80 rounded-xl text-slate-700 placeholder-slate-400 focus:bg-white focus:border-sky-300 transition-all outline-none" />
-          </div>
-          <div className="flex items-center gap-1.5 flex-wrap">
+          {/* Status filter pills */}
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
             {[
               { key: '', label: 'Tất cả' },
               { key: 'Chưa Có Xe', label: 'Chưa Có Xe' },
               { key: 'Chưa Hòa Tất', label: 'Chưa Hoàn Tất' },
               { key: 'Hoàn Tất', label: 'Hoàn Tất' },
             ].map(f => {
+              const st = f.key ? getStatus(f.key) : null;
               const active = statusFilter === f.key;
-              const fst = f.key ? getStatus(f.key) : null;
               return (
-                <button key={f.key} onClick={() => setStatusFilter(f.key)}
-                  className={`h-9 px-3 text-xs font-semibold rounded-xl border transition-all active:scale-95 ${active ? 'text-white shadow-md' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}
-                  style={active ? { background: fst ? fst.color : '#1D354D', borderColor: fst ? fst.color : '#1D354D' } : {}}>
-                  {f.label}
-                </button>
+                <button key={f.key} onClick={() => setStatusFilter(f.key)} style={{
+                  height: 24, padding: '0 9px', fontSize: 11, fontWeight: 600, borderRadius: 12,
+                  border: active ? 'none' : `1px solid ${CLR.border}`,
+                  background: active ? (st ? st.color : CLR.primary) : CLR.card,
+                  color: active ? '#fff' : CLR.secondary, cursor: 'pointer',
+                }}>{f.label}</button>
               );
             })}
           </div>
         </div>
-      </div>
 
-      {/* Booking List */}
-      <div className="space-y-3">
-        {loading && bookings.length === 0 ? (
-          <div className="glass-card rounded-2xl p-16 text-center">
-            <RefreshCw size={32} className="mx-auto mb-3 text-amber-400 animate-spin" />
-            <p className="text-sm font-medium text-slate-500">Đang tải dữ liệu từ Google Sheets...</p>
+        {/* ── SEARCH ── */}
+        <div style={{ padding: '10px 20px 0', flexShrink: 0 }}>
+          <div style={{ position: 'relative', width: 320 }}>
+            <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: CLR.muted }} />
+            <input
+              value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Tìm ID, Dự án, NV..."
+              style={{
+                width: '100%', height: 34, paddingLeft: 30, paddingRight: 12,
+                fontSize: 13, border: `1px solid ${CLR.border}`, borderRadius: 8,
+                background: CLR.card, color: CLR.text, outline: 'none',
+              }}
+            />
           </div>
-        ) : filtered.length === 0 ? (
-          <div className="glass-card rounded-2xl p-12 text-center text-slate-400">
-            <Truck size={48} className="mx-auto mb-3 opacity-30" />
-            <p className="text-sm font-medium">Không tìm thấy booking phù hợp</p>
-          </div>
-        ) : filtered.map((booking, idx) => {
-          const isExpanded = expandedBooking === booking.ID_CODE;
-          const st = getStatus(booking.Tinh_Trang);
-
-          return (
-            <div key={`${booking.ID_CODE}_${idx}`} className="glass-card rounded-2xl overflow-hidden animate-fade-in" style={{ animationDelay: `${Math.min(idx, 10) * 25}ms` }}>
-              {/* Header Row */}
-              <div className="p-4 flex items-center gap-3 cursor-pointer hover:bg-slate-50/50 transition-all" onClick={() => toggleExpand(booking.ID_CODE)}>
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: 'linear-gradient(135deg, #FFD100, #D97706)' }}>
-                  <Truck size={18} color="#fff" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                    <span className="text-sm font-bold text-slate-800 font-mono">{booking.ID_CODE}</span>
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-lg text-[10px] font-bold border" style={{ color: st.color, background: st.bg, borderColor: st.border }}>{st.label}</span>
-                    {booking.PODs.length > 0 && <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold text-sky-600 bg-sky-50 border border-sky-200"><Image size={10} /> {booking.PODs.length}</span>}
-                  </div>
-                  <div className="flex items-center gap-2 text-xs text-slate-500 flex-wrap">
-                    <span className="font-semibold text-slate-700">{booking.Doi_Tac || '—'}</span>
-                    <span className="text-slate-300">|</span>
-                    <span className="flex items-center gap-1"><Calendar size={11} /> {booking.Ngay}</span>
-                    {booking.NCCs.length > 0 && <><span className="text-slate-300">|</span><span className="truncate max-w-[180px]">NCC: {booking.NCCs.join(', ')}</span></>}
-                  </div>
-                </div>
-                {/* Stats columns */}
-                <div className="hidden md:flex items-center gap-5 text-xs text-slate-500">
-                  <div className="text-center"><p className="font-bold text-slate-700">{booking.So_Chuyen}</p><p>Chuyến</p></div>
-                  <div className="text-center"><p className="font-bold text-emerald-600">{fmtVND(booking.Tong_Thu)}</p><p>Thu KH</p></div>
-                  <div className="text-center"><p className="font-bold text-red-500">{fmtVND(booking.Tong_Tra_NCC)}</p><p>Trả NCC</p></div>
-                  <div className="text-center"><p className="font-bold" style={{ color: booking.Profit >= 0 ? '#059669' : '#DC2626' }}>{fmtVND(booking.Profit)}</p><p>Lãi/Lỗ</p></div>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button onClick={(e) => { e.stopPropagation(); setSelectedBooking(booking); }} className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-sky-600 hover:bg-sky-50 transition-colors" title="Xem chi tiết"><Eye size={15} /></button>
-                  {isExpanded ? <ChevronDown size={16} className="text-slate-400" /> : <ChevronRight size={16} className="text-slate-400" />}
-                </div>
-              </div>
-
-              {/* Expanded trips */}
-              {isExpanded && (
-                <div className="border-t border-slate-100 animate-fade-in">
-                  <div className="px-4 py-2 bg-slate-50/50 flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{booking.So_Chuyen} chuyến xe</span>
-                    <button onClick={(e) => { e.stopPropagation(); setSelectedBooking(booking); }} className="text-xs font-bold text-sky-600 flex items-center gap-1 hover:text-sky-700"><Eye size={12} /> Xem đầy đủ</button>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-slate-100 bg-slate-50/30">
-                          {['#', 'ID', 'Biển số', 'Tài xế', 'Loại xe', 'Điểm nhận → Giao', 'Thu KH', 'Trả NCC', 'PS NCC', 'Lãi/Lỗ', 'NCC', 'Trạng thái'].map(h => (
-                            <th key={h} className="px-3 py-2 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {booking.trips.map((trip, i) => {
-                          const tst = getStatus(trip.Trang_Thai);
-                          return (
-                            <tr key={`${trip.ID}_${i}`} className="border-b border-slate-50 hover:bg-sky-50/30 transition-colors">
-                              <td className="px-3 py-2.5 text-xs text-slate-400 font-bold">{i + 1}</td>
-                              <td className="px-3 py-2.5 font-mono text-[11px] text-slate-500">{trip.ID}</td>
-                              <td className="px-3 py-2.5"><span className="font-mono text-xs font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded">{trip.Bien_So}</span></td>
-                              <td className="px-3 py-2.5 text-xs text-slate-600 max-w-[100px] truncate">{trip.Tai_Xe}</td>
-                              <td className="px-3 py-2.5"><span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded-md">{trip.Loai_Xe || '—'}</span></td>
-                              <td className="px-3 py-2.5 max-w-[250px]">
-                                <div className="flex items-center gap-1 text-xs text-slate-600">
-                                  <MapPin size={10} className="text-emerald-500 flex-shrink-0" />
-                                  <span className="truncate max-w-[100px]">{trip.Dia_Chi_Nhan || '—'}</span>
-                                  <ArrowRight size={10} className="text-slate-300 flex-shrink-0" />
-                                  <MapPin size={10} className="text-red-500 flex-shrink-0" />
-                                  <span className="truncate max-w-[100px]">{trip.Dia_Chi_Giao || '—'}</span>
-                                </div>
-                              </td>
-                              <td className="px-3 py-2.5 text-xs font-semibold text-emerald-600 whitespace-nowrap">{trip.Cuoc_Thu_KH ? fmtFullVND(trip.Cuoc_Thu_KH) : '—'}</td>
-                              <td className="px-3 py-2.5 text-xs font-semibold text-red-600 whitespace-nowrap">{trip.Don_Gia_NCC ? fmtFullVND(trip.Don_Gia_NCC) : '—'}</td>
-                              <td className="px-3 py-2.5 text-xs text-orange-600 whitespace-nowrap">{trip.Phi_Khac_NCC ? fmtFullVND(trip.Phi_Khac_NCC) : '—'}</td>
-                              <td className="px-3 py-2.5 text-xs font-bold whitespace-nowrap" style={{ color: trip.Profit >= 0 ? '#059669' : '#DC2626' }}>{fmtFullVND(trip.Profit)}</td>
-                              <td className="px-3 py-2.5 text-xs text-slate-600 max-w-[100px] truncate" title={trip.NCC_Raw}>{trip.NCC || '—'}</td>
-                              <td className="px-3 py-2.5"><span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold" style={{ color: tst.color, background: tst.bg }}>{tst.label}</span></td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="px-4 py-3 bg-gradient-to-r from-amber-50 to-orange-50 border-t border-amber-100 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs">
-                    <span className="text-slate-600">Thu KH: <strong className="text-emerald-700">{fmtFullVND(booking.Tong_Thu)}</strong></span>
-                    <span className="text-slate-600">Trả NCC: <strong className="text-red-600">{fmtFullVND(booking.Tong_Tra_NCC)}</strong></span>
-                    <span className="text-slate-600">PS NCC: <strong className="text-orange-600">{fmtFullVND(booking.Tong_Phat_Sinh)}</strong></span>
-                    <span className="text-slate-600">Lãi/Lỗ: <strong style={{ color: booking.Profit >= 0 ? '#059669' : '#DC2626' }}>{fmtFullVND(booking.Profit)}</strong></span>
-                    <span className="ml-auto text-slate-400">NV: {booking.NV_HoTen || booking.NV_Update || '—'}</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {bookings.length > 0 && (
-        <div className="text-center text-[11px] text-slate-400 py-2">
-          Hiển thị {filtered.length}/{bookings.length} phiếu • {stats.totalTrips} chuyến xe
         </div>
-      )}
+
+        {/* ── DATA TABLE ── */}
+        <div style={{ flex: 1, overflow: 'auto', padding: '10px 20px 20px' }}>
+          {error && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
+              background: '#FEF2F2', border: `1px solid #FECACA`, borderRadius: 8,
+              fontSize: 13, color: '#DC2626', marginBottom: 12,
+            }}>
+              <AlertCircle size={15} /> {error}
+            </div>
+          )}
+
+          <div style={{ background: CLR.card, borderRadius: 10, border: `1px solid ${CLR.border}`, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.07)' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: '#FFF8EC', borderBottom: `1px solid ${CLR.border}` }}>
+                  {[
+                    { label: 'Ngày', w: 96 },
+                    { label: 'Dự Án', w: 180 },
+                    { label: 'Lợi Nhuận', w: 100, right: true },
+                    { label: 'Điểm Nhận', w: 200 },
+                    { label: 'Chuyến', w: 64, right: true },
+                    { label: 'Đơn Giá KH', w: 106, right: true },
+                    { label: 'Đơn Giá NCC', w: 106, right: true },
+                    { label: 'Trạng Thái', w: 130 },
+                    { label: 'Note', w: 160 },
+                    { label: 'NV Update', w: 150 },
+                    { label: 'Thao Tác', w: 80, right: true },
+                  ].map(col => (
+                    <th key={col.label} style={{
+                      padding: '9px 12px', textAlign: col.right ? 'right' : 'left',
+                      fontSize: 11, fontWeight: 700, color: '#92400E',
+                      textTransform: 'uppercase', letterSpacing: '0.06em',
+                      whiteSpace: 'nowrap', width: col.w, userSelect: 'none',
+                    }}>{col.label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {loading && bookings.length === 0 ? (
+                  // Skeleton
+                  Array.from({ length: 5 }).map((_, i) => (
+                    <tr key={i} style={{ borderBottom: `1px solid #F3F4F6` }}>
+                      {Array.from({ length: 11 }).map((_, j) => (
+                        <td key={j} style={{ padding: '11px 12px' }}>
+                          <div style={{
+                            height: 12, borderRadius: 4,
+                            background: `linear-gradient(90deg, #F3F4F6 0%, #E5E7EB ${50 + i * 10}%, #F3F4F6 100%)`,
+                            animation: 'pulse 1.5s ease infinite',
+                            width: j === 0 ? 72 : j === 10 ? 48 : '80%',
+                          }} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                ) : filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={11} style={{ padding: '48px 24px', textAlign: 'center' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+                        <Truck size={36} color={CLR.muted} />
+                        <span style={{ fontSize: 13, color: CLR.muted, fontWeight: 500 }}>
+                          {search || statusFilter || dayFilter !== 'all' ? 'Không tìm thấy kết quả phù hợp' : 'Chưa có dữ liệu booking'}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : filtered.map((bk, idx) => {
+                  const st = getStatus(bk.Tinh_Trang);
+                  const profitColor = bk.Profit > 0 ? CLR.green : bk.Profit < 0 ? CLR.red : CLR.muted;
+                  const donGiaKH = bk.Tong_Thu;
+                  const donGiaNCC = bk.Tong_Tra_NCC;
+                  const diemNhan = bk.trips?.[0]?.Dia_Chi_Nhan || '—';
+                  return (
+                    <tr
+                      key={`${bk.ID_CODE}_${idx}`}
+                      onClick={() => router.push(`/tms/booking/${encodeURIComponent(bk.ID_CODE)}`)}
+                      style={{
+                        borderBottom: `1px solid #F3F4F6`,
+                        cursor: 'pointer', transition: 'background 0.1s',
+                      }}
+                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#F8FAFF'}
+                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+                    >
+                      {/* Ngày */}
+                      <td style={{ padding: '10px 12px', whiteSpace: 'nowrap', fontSize: 12.5, color: CLR.secondary }}>{bk.Ngay || '—'}</td>
+                      {/* Dự Án */}
+                      <td style={{ padding: '10px 12px', maxWidth: 180 }}>
+                        <span style={{
+                          fontSize: 13, fontWeight: 600, color: CLR.primary,
+                          display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          cursor: 'pointer',
+                        }}
+                          title={bk.Doi_Tac || bk.Du_An}
+                        >{bk.Doi_Tac || bk.Du_An || '—'}</span>
+                      </td>
+                      {/* Lợi Nhuận */}
+                      <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: profitColor, fontVariantNumeric: 'tabular-nums' }}>
+                          {bk.Profit !== 0 ? fmtFull(bk.Profit) : '—'}
+                        </span>
+                      </td>
+                      {/* Điểm Nhận */}
+                      <td style={{ padding: '10px 12px', maxWidth: 200 }}>
+                        <span style={{ fontSize: 12, color: CLR.secondary, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={diemNhan}
+                        >{diemNhan}</span>
+                      </td>
+                      {/* Chuyến */}
+                      <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: bk.So_Chuyen > 0 ? CLR.primary : CLR.muted }}>
+                          {bk.So_Chuyen || 0}
+                        </span>
+                      </td>
+                      {/* Đơn Giá KH */}
+                      <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                        <span style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums', color: CLR.text }}>
+                          {donGiaKH > 0 ? fmtFull(donGiaKH) : '—'}
+                        </span>
+                      </td>
+                      {/* Đơn Giá NCC */}
+                      <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                        <span style={{ fontSize: 12.5, fontVariantNumeric: 'tabular-nums', color: CLR.text }}>
+                          {donGiaNCC > 0 ? fmtFull(donGiaNCC) : '—'}
+                        </span>
+                      </td>
+                      {/* Trạng Thái */}
+                      <td style={{ padding: '10px 12px' }}>
+                        <span style={{
+                          display: 'inline-flex', alignItems: 'center',
+                          height: 22, padding: '0 9px', borderRadius: 11,
+                          fontSize: 11, fontWeight: 700,
+                          border: `1px solid ${st.border}`, background: st.bg, color: st.color,
+                          whiteSpace: 'nowrap',
+                        }}>{st.label}</span>
+                      </td>
+                      {/* Note */}
+                      <td style={{ padding: '10px 12px', maxWidth: 160 }}>
+                        <span style={{ fontSize: 12, color: CLR.secondary, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={bk.Note}
+                        >{bk.Note || '—'}</span>
+                      </td>
+                      {/* NV Update */}
+                      <td style={{ padding: '10px 12px' }}>
+                        <span style={{ fontSize: 12, color: CLR.secondary }}>{bk.NV_HoTen || bk.NV_Update || '—'}</span>
+                      </td>
+                      {/* Thao Tác */}
+                      <td style={{ padding: '10px 12px', textAlign: 'right' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2 }} onClick={e => e.stopPropagation()}>
+                          <button
+                            onClick={e => { e.stopPropagation(); handleCopy(bk.ID_CODE); }}
+                            title="Copy ID"
+                            style={{
+                              width: 28, height: 28, borderRadius: 6, border: 'none',
+                              background: copied === bk.ID_CODE ? '#D1FAE5' : 'transparent',
+                              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              color: copied === bk.ID_CODE ? '#16A34A' : CLR.muted,
+                            }}
+                          ><Copy size={13} /></button>
+                          <button
+                            onClick={e => { e.stopPropagation(); if (confirm(`Xóa ${bk.ID_CODE}?`)) alert('Chức năng xóa sẽ được triển khai'); }}
+                            title="Xóa"
+                            style={{
+                              width: 28, height: 28, borderRadius: 6, border: 'none',
+                              background: 'transparent', cursor: 'pointer',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              color: CLR.muted,
+                            }}
+                            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = '#FEF2F2'; (e.currentTarget as HTMLElement).style.color = '#DC2626'; }}
+                            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; (e.currentTarget as HTMLElement).style.color = CLR.muted; }}
+                          ><Trash2 size={13} /></button>
+                          <ChevronRight size={13} color={CLR.muted} />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            {/* Pagination footer */}
+            {filtered.length > 0 && (
+              <div style={{
+                padding: '8px 16px', borderTop: `1px solid ${CLR.border}`,
+                fontSize: 11, color: CLR.muted, textAlign: 'right', background: '#FAFAFA'
+              }}>
+                {filtered.length} trong tổng số {bookings.length} phiếu • {stats.chuyen} chuyến xe
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+      `}</style>
     </div>
   );
 }

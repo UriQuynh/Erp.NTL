@@ -9,6 +9,10 @@ import {
   RefreshCw, Tag, Info
 } from 'lucide-react';
 
+// ── Design system tokens ──
+const TMS_PRIMARY = '#1E3A5F';
+const TMS_GOLD = '#F5A623';
+
 // ─── Types ───
 interface GroupOption {
   group: string;
