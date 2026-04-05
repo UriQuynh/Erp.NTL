@@ -335,48 +335,65 @@ export interface GroupCVRow {
     Khoan: string;
 }
 
-/** 1.Data_Xe_PhieuBK -- Parent Booking Data */
+/** 1.Data_Xe_PhieuBK -- Phiếu Booking (Header)
+ *  Actual Gviz columns: ID, Ngay, Du_An, Diem_Nhan, Tai_Tong, Don_Gia_KH, Don_Gia_NCC, Loi_Nhuan, Note, NV_Update, Trong_Luong
+ */
 export interface PhieuBKRow {
-    ID: string;
-    Ngay: string;
-    Du_An: string;
-    Diem_Nhan: string;
-    Tai_Tong: string;
-    Don_Gia_KH: string;
-    Don_Gia_NCC: string;
-    Loi_Nhuan: string;
-    Note: string;
-    NV_Update: string;
-    Trong_Luong: string;
+    ID: string;           // Primary Key — BANGKE_XXXXXXXX or PXK_XXXXXXXX
+    Ngay: string;         // Ngày booking (dd/mm/yyyy)
+    Du_An: string;        // Đối tác/Dự án (e.g. "Pantos - LG")
+    Diem_Nhan: string;    // Điểm nhận (if any)
+    Tai_Tong: string;     // Tải trọng tổng
+    Don_Gia_KH: string;   // Đơn giá khách hàng (aggregate)
+    Don_Gia_NCC: string;  // Đơn giá NCC (aggregate) 
+    Loi_Nhuan: string;    // Lợi nhuận (aggregate)
+    Note: string;         // Ghi chú
+    NV_Update: string;    // Nhân viên (MaNV - HoTen)
+    Trong_Luong: string;  // Trọng lượng
+    [key: string]: string;
 }
 
-/** 1.Data_Xe_BK -- Trip Data associated with a Booking */
+/** 1.Data_Xe_BK -- Chi Tiết Chuyến Xe (Detail)
+ *  Actual Gviz columns: ID_PXK, ID, Ngay, Du_An/BC→Du_AnBC, Dia_Chi_Nhan, Dia_Chi_Giao,
+ *  Nguoi_YC, Thoi_Gian_BK, Thoi_Gian_Den, Thoi_Gian_Xuat, Thoi_Gian_DenKho,
+ *  Thoi_Gian_HoanThanh, Loai_Hang, Thong_Tin, So_Bill, Bien So→Bien_So, Loai_Xe,
+ *  Loai_xe_YC, Hinh_Anh1..4, Trang_Thai, Tai_Xe, Trong_Luong, Leadtime,
+ *  NCC, Don_Gia, Phi_Khac, Cuoc_Thu_KH, Cuoc_Khac_Thu_KH, Code, Tuyen, Map
+ */
 export interface TripBKRow {
-    ID_PXK: string;
-    ID: string;
-    Ngay: string;
-    Du_AnBC: string;  // Normalization removes the '/'
-    Dia_Chi_Nhan: string;
-    Dia_Chi_Giao: string;
-    Nguoi_YC: string;
-    Thoi_Gian_BK: string;
-    Thoi_Gian_Den: string;
-    Thoi_Gian_Xuat: string;
-    Thoi_Gian_DenKho: string;
-    Thoi_Gian_HoanThanh: string;
-    Loai_Hang: string;
-    Thong_Tin: string;
-    So_Bill: string;
-    Bien_So: string; // Space replaced by underscore
-    Loai_Xe: string;
-    Loai_xe_YC: string;
-    Hinh_Anh1: string;
-    Trang_Thai: string;
-    Tai_Xe: string;
-    Trong_Luong: string;
-    Leadtime: string;
-    NCC: string;
-    Don_Gia: string;
-    Phi_Khac: string;
-    Cuoc_Thu_KH: string;
+    ID_PXK: string;             // FK → PhieuBKRow.ID
+    ID: string;                 // Trip UUID
+    Ngay: string;               // Ngày chuyến
+    Du_AnBC: string;            // Dự án / BC (sanitized from "Du_An/BC")
+    Dia_Chi_Nhan: string;       // Địa chỉ nhận hàng
+    Dia_Chi_Giao: string;       // Địa chỉ giao hàng
+    Nguoi_YC: string;           // Người yêu cầu
+    Thoi_Gian_BK: string;       // Thời gian booking
+    Thoi_Gian_Den: string;      // Thời gian đến
+    Thoi_Gian_Xuat: string;     // Thời gian xuất
+    Thoi_Gian_DenKho: string;   // Thời gian đến kho
+    Thoi_Gian_HoanThanh: string;// Thời gian hoàn thành
+    Loai_Hang: string;          // Loại hàng
+    Thong_Tin: string;          // Thông tin thêm
+    So_Bill: string;            // Số bill
+    Bien_So: string;            // Biển số xe (sanitized from "Bien So")
+    Loai_Xe: string;            // Loại xe (VH5, VH8...) = Equipment_Type
+    Loai_xe_YC: string;         // Loại xe yêu cầu
+    Hinh_Anh1: string;          // Ảnh POD 1
+    Hinh_Anh2: string;          // Ảnh POD 2
+    Hinh_Anh3: string;          // Ảnh POD 3
+    Hinh_Anh4: string;          // Ảnh POD 4
+    Trang_Thai: string;         // Trạng thái chuyến
+    Tai_Xe: string;             // Tài xế
+    Trong_Luong: string;        // Trọng lượng
+    Leadtime: string;           // Leadtime
+    NCC: string;                // Nhà cung cấp (NCC_<tên>)
+    Don_Gia: string;            // Đơn giá NCC (VND)
+    Phi_Khac: string;           // Phí phát sinh NCC
+    Cuoc_Thu_KH: string;        // Cước thu khách hàng
+    Cuoc_Khac_Thu_KH: string;   // Cước khác thu KH (phí PS)
+    Code: string;               // Code tuyến
+    Tuyen: string;              // Tuyến đường
+    Map: string;                // Map link
+    [key: string]: string;
 }

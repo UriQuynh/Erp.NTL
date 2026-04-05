@@ -3,6 +3,29 @@ import { fetchSheet, TMS_SPREADSHEET_ID, PhieuBKRow, TripBKRow } from '@/lib/goo
 
 export const dynamic = 'force-dynamic';
 
+/** Parse VND amount string → number. Handles comma, dot, text. */
+function parseVND(raw: string | undefined): number {
+    if (!raw) return 0;
+    const cleaned = raw.replace(/[^\d.-]/g, '');
+    return parseFloat(cleaned) || 0;
+}
+
+/** Strip "NCC_" prefix for display */
+function cleanNCC(raw: string): string {
+    if (!raw) return '';
+    return raw.replace(/^NCC_/i, '').trim();
+}
+
+/** Parse NV_Update "MaNV - HoTen" */
+function parseNV(raw: string): { maNV: string; hoTen: string } {
+    if (!raw) return { maNV: '', hoTen: '' };
+    const parts = raw.split(' - ');
+    return {
+        maNV: (parts[0] || '').trim(),
+        hoTen: (parts.slice(1).join(' - ') || '').trim(),
+    };
+}
+
 export async function GET(request: NextRequest) {
     try {
         // Fetch both sheets concurrently
@@ -11,72 +34,130 @@ export async function GET(request: NextRequest) {
             fetchSheet<TripBKRow>('1.Data_Xe_BK', TMS_SPREADSHEET_ID),
         ]);
 
-        // Group trips by Booking ID (ID_PXK)
-        const tripsByBooking: Record<string, any[]> = {};
+        // ── QUY TẮC 1: Group trips by ID_PXK (FK → PhieuBK.ID) ──
+        const tripsByBooking: Record<string, TripBKRow[]> = {};
         tripData.forEach(trip => {
-            const bookingId = trip.ID_PXK || trip.ID; // Fallback if ID_PXK is missing
-            if (!tripsByBooking[bookingId]) {
-                tripsByBooking[bookingId] = [];
-            }
-            tripsByBooking[bookingId].push({
-                ID: trip.ID,
-                Diem_Di: trip.Dia_Chi_Nhan || '',
-                Diem_Den: trip.Dia_Chi_Giao || '',
-                Bien_So: trip.Bien_So || 'Chưa xếp xe',
-                Tai_Xe: trip.Tai_Xe || 'Chưa xếp tài',
-                KM: '0', // Not available in sheet natively unless calculated
-                Don_Gia: trip.Don_Gia || trip.Cuoc_Thu_KH || '0',
-                Trang_Thai: trip.Trang_Thai || 'Chưa thực hiện',
-                Time_In: trip.Thoi_Gian_Den || '',
-                Time_Out: trip.Thoi_Gian_DenKho || '',
-                // Preserve additional info for UI if needed
-                Loai_Hang: trip.Loai_Hang,
-                So_Bill: trip.So_Bill,
-                Trong_Luong: trip.Trong_Luong,
-                Nguoi_YC: trip.Nguoi_YC
-            });
+            const fk = (trip.ID_PXK || '').trim();
+            if (!fk) return;
+            if (!tripsByBooking[fk]) tripsByBooking[fk] = [];
+            tripsByBooking[fk].push(trip);
         });
 
-        // Map parent bookings — deduplicate by ID to prevent duplicate React keys
+        // ── Build booking entries (deduplicated by ID) ──
         const bookingMap = new Map<string, any>();
-        
-        phieuData.forEach(phieu => {
-            const parentId = phieu.ID;
-            if (!parentId || parentId.trim() === '') return; // Skip empty rows
-            
-            // If we already processed this ID, skip (first occurrence wins for metadata)
-            if (bookingMap.has(parentId)) return;
-            
-            const trips = tripsByBooking[parentId] || [];
 
-            // Aggregate NCC (usually from trips if not in parent, but let's grab from first trip if available)
-            const ncc = trips.find(t => t.NCC)?.NCC || 'Chưa xác định';
-            
-            // Determine combined status
-            let trangThai = 'Chưa thực hiện';
+        phieuData.forEach(phieu => {
+            const idCode = (phieu.ID || '').trim();
+            if (!idCode) return;               // Skip empty rows
+            if (bookingMap.has(idCode)) return; // Dedupe — first occurrence wins
+
+            const trips = tripsByBooking[idCode] || [];
+
+            // ── QUY TẮC 4: Derive status from trip states ──
+            let tinhTrang = 'Chưa Có Xe';
             if (trips.length > 0) {
-                const completeCount = trips.filter(t => t.Trang_Thai === 'Hoàn thành' || t.Trang_Thai === 'Đã hoàn thành').length;
-                if (completeCount === trips.length) {
-                    trangThai = 'Hoàn thành';
-                } else if (completeCount > 0 || trips.some(t => t.Trang_Thai && t.Trang_Thai !== 'Chưa thực hiện' && t.Trang_Thai !== 'Đã hủy')) {
-                    trangThai = 'Đang vận chuyển';
+                const done = trips.filter(t =>
+                    (t.Trang_Thai || '').includes('Hoàn Tất') ||
+                    (t.Trang_Thai || '').includes('Hoàn thành') ||
+                    (t.Trang_Thai || '').includes('Đã hoàn thành')
+                ).length;
+                const hasVehicle = trips.some(t => t.Bien_So && t.Bien_So.trim() !== '');
+                if (done === trips.length) {
+                    tinhTrang = 'Hoàn Tất';
+                } else if (done > 0 || hasVehicle) {
+                    tinhTrang = 'Chưa Hòa Tất';
+                } else {
+                    tinhTrang = 'Chưa Có Xe';
                 }
             }
 
-            // Get Vehicle Type from first trip
-            const loaiXe = trips.length > 0 ? (trips[0].Loai_Xe || trips[0].Loai_xe_YC || 'Chưa xác định') : 'Chưa xác định';
+            // ── QUY TẮC 7: Parse nhân viên ──
+            const nv = parseNV(phieu.NV_Update || '');
 
-            bookingMap.set(parentId, {
-                ID_PXK: parentId,
-                Du_An: phieu.Du_An || 'Không xác định',
-                NCC: ncc,
-                Loai_Xe: loaiXe,
-                Ngay_Tao: phieu.Ngay || '',
-                Trang_Thai: trangThai,
-                So_Chuyen: trips.length,
-                Ghi_Chu: phieu.Note || '',
-                Nguoi_Tao: phieu.NV_Update || 'Hệ thống',
-                trips: trips
+            // ── Map trips with financial data (PHẦN 3 rules) ──
+            // Actual column mapping:
+            //   Cuoc_Thu_KH     → Thu khách = Don_Gia_Doitac
+            //   Cuoc_Khac_Thu_KH → Phí khác thu KH = Phi_Khac_Doitac
+            //   Don_Gia         → Đơn giá NCC
+            //   Phi_Khac        → Phát sinh NCC
+            const mappedTrips = trips.map(t => {
+                const cuocThuKH = parseVND(t.Cuoc_Thu_KH);
+                const cuocKhacThuKH = parseVND(t.Cuoc_Khac_Thu_KH);
+                const donGiaNCC = parseVND(t.Don_Gia);
+                const phiKhac = parseVND(t.Phi_Khac);
+                // Lãi/chuyến = CuocThuKH - DonGiaNCC - PhiKhac + CuocKhacThuKH
+                const profit = cuocThuKH - donGiaNCC - phiKhac + cuocKhacThuKH;
+
+                // POD images from trip (Hinh_Anh1..4)
+                const pods = [t.Hinh_Anh1, t.Hinh_Anh2, t.Hinh_Anh3, t.Hinh_Anh4].filter(p => p && p.trim());
+
+                return {
+                    ID: t.ID || '',
+                    ID_PXK: idCode,
+                    Bien_So: t.Bien_So || 'Chưa xếp xe',
+                    Tai_Xe: t.Tai_Xe || 'Chưa xếp tài',
+                    Trong_Luong: t.Trong_Luong || '',
+                    Loai_Xe: t.Loai_Xe || t.Loai_xe_YC || '',
+                    Dia_Chi_Nhan: t.Dia_Chi_Nhan || '',
+                    Dia_Chi_Giao: t.Dia_Chi_Giao || '',
+                    Loai_Hang: t.Loai_Hang || '',
+                    So_Bill: t.So_Bill || '',
+                    // Financial — using actual sheet column names
+                    Cuoc_Thu_KH: cuocThuKH,        // Thu khách
+                    Cuoc_Khac_Thu_KH: cuocKhacThuKH, // PS thu khách
+                    Don_Gia_NCC: donGiaNCC,        // Trả NCC
+                    Phi_Khac_NCC: phiKhac,         // PS trả NCC
+                    NCC_Raw: t.NCC || '',
+                    NCC: cleanNCC(t.NCC || ''),
+                    Trang_Thai: t.Trang_Thai || '',
+                    Nguoi_YC: t.Nguoi_YC || '',
+                    Code: t.Code || '',
+                    Tuyen: t.Tuyen || '',
+                    // Timestamps
+                    Thoi_Gian_BK: t.Thoi_Gian_BK || '',
+                    Thoi_Gian_Den: t.Thoi_Gian_Den || '',
+                    Thoi_Gian_DenKho: t.Thoi_Gian_DenKho || '',
+                    // PODs on trip level
+                    PODs: pods,
+                    // Calculated
+                    Tong_Thu: cuocThuKH + cuocKhacThuKH,
+                    Tong_Tra: donGiaNCC + phiKhac,
+                    Profit: profit,
+                };
+            });
+
+            // Booking-level aggregates
+            const tongThu = mappedTrips.reduce((s, t) => s + t.Tong_Thu, 0);
+            const tongTraNCC = mappedTrips.reduce((s, t) => s + t.Tong_Tra, 0);
+            const tongPhatSinh = mappedTrips.reduce((s, t) => s + t.Phi_Khac_NCC, 0);
+            const tongProfit = mappedTrips.reduce((s, t) => s + t.Profit, 0);
+
+            // Collect unique NCCs
+            const uniqueNCCs = [...new Set(mappedTrips.map(t => t.NCC).filter(Boolean))];
+
+            // Collect all PODs from trips
+            const allPODs = mappedTrips.flatMap(t => t.PODs);
+
+            bookingMap.set(idCode, {
+                ID_CODE: idCode,
+                Ngay: phieu.Ngay || '',
+                Du_An: phieu.Du_An || '',
+                Doi_Tac: phieu.Du_An || '',  // Du_An is the partner/project name
+                Tinh_Trang: tinhTrang,
+                NV_Update: phieu.NV_Update || '',
+                NV_MaNV: nv.maNV,
+                NV_HoTen: nv.hoTen,
+                Note: phieu.Note || '',
+                PODs: allPODs,
+                // Aggregates
+                So_Chuyen: mappedTrips.length,
+                Tong_Thu: tongThu,
+                Tong_Tra_NCC: tongTraNCC,
+                Tong_Phat_Sinh: tongPhatSinh,
+                Profit: tongProfit,
+                NCCs: uniqueNCCs,
+                // Children
+                trips: mappedTrips,
             });
         });
 
@@ -85,9 +166,9 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({
             success: true,
             count: validBookings.length,
+            tripCount: tripData.length,
             data: validBookings,
         });
-
     } catch (error) {
         console.error('TMS Booking fetch error:', error);
         return NextResponse.json(
