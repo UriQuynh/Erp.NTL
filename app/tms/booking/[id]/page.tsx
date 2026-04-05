@@ -49,11 +49,11 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 }
 
 // ── Input field ──
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, badge }: { label: string; children: React.ReactNode; badge?: React.ReactNode }) {
   return (
     <div>
-      <label style={{ display: 'block', fontSize: 11, fontWeight: 500, color: C.secondary, marginBottom: 4 }}>
-        {label}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 500, color: C.secondary, marginBottom: 4 }}>
+        {label}{badge}
       </label>
       {children}
     </div>
@@ -192,6 +192,19 @@ interface Suggestions {
   driverMap: Record<string, string>;
 }
 
+// ─── Banggia (vehicle pricing) types ───
+interface BanggiaVehicle {
+  loai_xe: string;
+  kich_thuoc: string;
+  don_gia: number;
+  display: string; // "VH5 - 6m2"
+}
+interface BanggiaData {
+  nccList: { ncc_id: string; ten_ncc: string; count: number }[];
+  vehiclesByNCC: Record<string, BanggiaVehicle[]>;
+  banggia: Array<{ ncc_id: string; ten_ncc: string; loai_xe: string; kich_thuoc: string; don_gia: number; display: string }>;
+}
+
 // ═══════════════════════════════════════
 // ADD TRIP MODAL with Smart Suggestions
 // ═══════════════════════════════════════
@@ -223,18 +236,27 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
   const [suggestions, setSuggestions] = useState<Suggestions | null>(null);
   const [sugLoading, setSugLoading] = useState(true);
 
-  // ── Fetch suggestions on mount ──
+  // ── Banggia (NCC → vehicle pricing) ──
+  const [banggia, setBanggia] = useState<BanggiaData | null>(null);
+  const [noteDirty, setNoteDirty] = useState(false); // track user manual edits to ghi chú
+
+  // ── Fetch suggestions + banggia on mount ──
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/api/tms/suggestions');
-        const json = await res.json();
-        if (!cancelled && json.success) {
-          setSuggestions(json.data);
+        const [sugRes, bgRes] = await Promise.all([
+          fetch('/api/tms/suggestions'),
+          fetch('/api/tms/banggia'),
+        ]);
+        const sugJson = await sugRes.json();
+        const bgJson = await bgRes.json();
+        if (!cancelled) {
+          if (sugJson.success) setSuggestions(sugJson.data);
+          if (bgJson.success) setBanggia(bgJson.data);
         }
       } catch (e) {
-        console.error('Failed to load suggestions:', e);
+        console.error('Failed to load suggestions/banggia:', e);
       } finally {
         if (!cancelled) setSugLoading(false);
       }
@@ -242,10 +264,57 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
     return () => { cancelled = true; };
   }, []);
 
+  // ── Derived: NCC options from banggia ──
+  const nccOptions = useMemo(() => {
+    if (!banggia?.nccList) return suggestions?.ncc || [];
+    return banggia.nccList.map(n => n.ten_ncc || n.ncc_id);
+  }, [banggia, suggestions]);
+
+  // ── Derived: Loại Xe options filtered by selected NCC ──
+  const loaiXeOptions = useMemo(() => {
+    if (!banggia?.vehiclesByNCC || !form.NCC) return [];
+    // Find NCC_ID matching selected name
+    const nccEntry = banggia.nccList?.find(n =>
+      n.ten_ncc === form.NCC || n.ncc_id === form.NCC
+    );
+    const nccId = nccEntry?.ncc_id || form.NCC;
+    return (banggia.vehiclesByNCC[nccId] || []).map(v => v.display);
+  }, [banggia, form.NCC]);
+
+  // ── Derived: vehicle count for selected NCC (biển số badge) ──
+  const bienSoCountForNCC = useMemo(() => {
+    if (!banggia?.nccList || !form.NCC) return 0;
+    const n = banggia.nccList.find(x => x.ten_ncc === form.NCC || x.ncc_id === form.NCC);
+    return n?.count || 0;
+  }, [banggia, form.NCC]);
+
   const setF = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
     setForm(p => ({ ...p, [k]: e.target.value }));
 
-  // ── Auto-fill logic: Biển Số → Tài Xế + SĐT ──
+  // ── Auto-fill: NCC change → reset Loai_Xe ──
+  const handleNCCChange = (v: string) => {
+    setForm(p => ({ ...p, NCC: v, Loai_Xe_YC: '' }));
+  };
+
+  // ── Auto-fill: Loại Xe → Ghi Chú Chuyến ──
+  const handleLoaiXeChange = (v: string) => {
+    setForm(p => {
+      const updated = { ...p, Loai_Xe_YC: v };
+      // Auto-fill ghi chú if not dirty
+      if (!noteDirty && banggia) {
+        const nccEntry = banggia.nccList?.find(n => n.ten_ncc === p.NCC || n.ncc_id === p.NCC);
+        const nccId = nccEntry?.ncc_id || p.NCC;
+        const vehicles = banggia.vehiclesByNCC[nccId] || [];
+        const match = vehicles.find(veh => veh.display === v);
+        if (match) {
+          updated.Note = `Xe ${match.loai_xe} thùng ${match.kich_thuoc}`;
+        }
+      }
+      return updated;
+    });
+  };
+
+  // ── Auto-fill: Biển Số → Tài Xế + SĐT ──
   const handleBienSoChange = (v: string) => {
     setForm(p => {
       const updated: typeof p = { ...p, Bien_So: v };
@@ -258,7 +327,7 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
     });
   };
 
-  // ── Auto-fill logic: Tài Xế → SĐT ──
+  // ── Auto-fill: Tài Xế → SĐT ──
   const handleTaiXeChange = (v: string) => {
     setForm(p => {
       const updated: typeof p = { ...p, Tai_Xe: v };
@@ -407,19 +476,25 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
             </div>
           </div>
 
-          {/* ── THÔNG TIN XE ── */}
+          {/* ── THÔNG TIN XE (Cascading: NCC → Loại Xe) ── */}
           <div>
             <SectionLabel>🚛 Thông tin xe</SectionLabel>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr 1fr', gap: 12 }}>
-              <Field label="NCC">
+              <Field label="NCC *">
                 <ComboBox
                   value={form.NCC}
-                  onChange={v => setForm(p => ({ ...p, NCC: v }))}
-                  options={suggestions?.ncc || []}
+                  onChange={handleNCCChange}
+                  options={nccOptions}
                   placeholder="Nhà cung cấp..."
                 />
               </Field>
-              <Field label="Biển Số">
+              <Field label="Biển Số" badge={
+                bienSoCountForNCC > 0 ? (
+                  <span style={{ fontSize: 10, color: '#2563EB', background: '#EFF6FF', padding: '1px 7px', borderRadius: 20, fontWeight: 600, marginLeft: 4 }}>
+                    {bienSoCountForNCC} xe ghi nhận
+                  </span>
+                ) : undefined
+              }>
                 <ComboBox
                   value={form.Bien_So}
                   onChange={handleBienSoChange}
@@ -427,11 +502,24 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
                   placeholder="Chọn hoặc nhập mới..."
                 />
               </Field>
-              <Field label="Loại Xe YC">
-                <input value={form.Loai_Xe_YC} onChange={setF('Loai_Xe_YC')} placeholder="Loại xe..." style={inputStyle()} />
+              <Field label="Loại Xe YC" badge={
+                form.NCC ? (
+                  <span style={{ fontSize: 9, color: C.muted, marginLeft: 4, fontStyle: 'italic' }}>↻ Tự động theo NCC</span>
+                ) : undefined
+              }>
+                {loaiXeOptions.length > 0 ? (
+                  <ComboBox
+                    value={form.Loai_Xe_YC}
+                    onChange={handleLoaiXeChange}
+                    options={loaiXeOptions}
+                    placeholder="Loại xe..."
+                  />
+                ) : (
+                  <input value={form.Loai_Xe_YC} onChange={setF('Loai_Xe_YC')} placeholder={form.NCC ? 'Không có dữ liệu xe cho NCC này' : 'Chọn NCC trước...'} style={inputStyle(!form.NCC)} />
+                )}
               </Field>
             </div>
-            {/* Auto-fill hint */}
+            {/* Auto-fill hint from Biển Số */}
             {form.Bien_So && suggestions?.phoneMap[form.Bien_So] && (
               <div style={{
                 marginTop: 6, fontSize: 10, color: '#16A34A', background: '#F0FDF4',
@@ -440,6 +528,16 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
                 <CheckCircle2 size={10} />
                 Đã tìm thấy thông tin xe: Tài xế <strong>{suggestions.phoneMap[form.Bien_So].taiXe || '—'}</strong>
                 {suggestions.phoneMap[form.Bien_So].sdt && <> | SĐT <strong>{suggestions.phoneMap[form.Bien_So].sdt}</strong></>}
+              </div>
+            )}
+            {/* Auto-fill hint from Loại Xe */}
+            {form.Loai_Xe_YC && form.NCC && !noteDirty && (
+              <div style={{
+                marginTop: 4, fontSize: 10, color: '#2563EB', background: '#EFF6FF',
+                padding: '4px 8px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 4,
+              }}>
+                <Truck size={10} />
+                Ghi chú chuyến tự động: <strong>{form.Note || '—'}</strong>
               </div>
             )}
           </div>
@@ -559,13 +657,19 @@ function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
           {/* ── GHI CHÚ CHUYẾN ── */}
           <div>
             <SectionLabel>📝 Ghi chú chuyến</SectionLabel>
+            {!noteDirty && form.Note && form.Loai_Xe_YC && (
+              <div style={{ fontSize: 10, color: '#16A34A', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                <CheckCircle2 size={10} /> Đã tự động điền từ Loại Xe. Bạn có thể chỉnh sửa.
+              </div>
+            )}
             <textarea
-              value={form.Note} onChange={setF('Note')}
-              placeholder="Ghi chú..."
+              value={form.Note}
+              onChange={e => { setNoteDirty(true); setForm(p => ({ ...p, Note: e.target.value })); }}
+              placeholder="Ghi chú (tự động điền khi chọn NCC + Loại Xe)..."
               style={{
                 width: '100%', minHeight: 72, padding: '8px 10px',
                 fontSize: 13, border: `1px solid ${C.border}`, borderRadius: 8,
-                background: C.card, resize: 'vertical', outline: 'none',
+                background: noteDirty ? C.card : '#F0FDF4', resize: 'vertical', outline: 'none',
                 boxSizing: 'border-box', color: C.text,
               }}
             />

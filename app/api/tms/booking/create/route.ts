@@ -5,7 +5,6 @@ export const dynamic = 'force-dynamic';
 /** Format dd/mm/yyyy for Google Sheets USER_ENTERED */
 function formatDateVN(dateStr: string): string {
     if (!dateStr) return '';
-    // Input from date picker: yyyy-mm-dd
     const [y, m, d] = dateStr.split('-');
     if (!y || !m || !d) return dateStr;
     return `${d}/${m}/${y}`;
@@ -13,8 +12,6 @@ function formatDateVN(dateStr: string): string {
 
 /** Generate suffix for booking ID */
 function generateSuffix(): string {
-    const array = new Uint8Array(4);
-    // Node.js crypto
     const { randomBytes } = require('crypto');
     const buf = randomBytes(4) as Buffer;
     return buf.toString('hex').toUpperCase();
@@ -24,8 +21,8 @@ export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
 
-        // ── Validate required fields ──
-        const { Du_An, Diem_Nhan, Diem_Giao, Ngay, Note, SDT, NV_Update, ID_CODE } = body;
+        // ── Validate required fields (updated schema: no SDT, no Diem_Giao) ──
+        const { Du_An, Diem_Nhan, Ngay, Note, NV_Update, ID_CODE, Trong_Luong } = body;
 
         if (!Du_An?.trim()) {
             return NextResponse.json({ success: false, error: 'Thiếu tên khách hàng / dự án' }, { status: 400 });
@@ -33,58 +30,50 @@ export async function POST(request: NextRequest) {
         if (!Diem_Nhan?.trim()) {
             return NextResponse.json({ success: false, error: 'Thiếu điểm lấy hàng' }, { status: 400 });
         }
-        if (!Diem_Giao?.trim()) {
-            return NextResponse.json({ success: false, error: 'Thiếu điểm giao hàng' }, { status: 400 });
-        }
         if (!NV_Update?.trim()) {
             return NextResponse.json({ success: false, error: 'Thiếu thông tin nhân viên' }, { status: 400 });
         }
 
         const bangkeId = ID_CODE || ('BANGKE_' + generateSuffix());
-        const noteWithSDT = SDT ? `${Note || ''} | SDT: ${SDT}`.trim().replace(/^\s*\|\s*/, '') : (Note || '');
         const ngayFormatted = formatDateVN(Ngay || '');
 
-        // ── Compose row A→Z (26 columns) ──
-        // Mapping from spec Section VII:
+        // ── Compose row matching sheet 1.Data_Xe_PhieuBK ──
+        // Column order: ID | Ngay | Du_An | Diem_Nhan | Tai_Tong | Don_Gia_KH | Don_Gia_NCC | Loi_Nhuan | Note | NV_Update | Trong_Luong
         const row = [
-            bangkeId,           // A = ID
-            '',                 // B = empty (Trip ID - điền khi tạo chuyến)
-            ngayFormatted,      // C = Ngay
-            '',                 // D = Booking description (empty)
-            '',                 // E = empty
-            '',                 // F = Bien_So (empty)
-            '',                 // G = Tai_Xe (empty)
-            '',                 // H = Tai_Trong (empty)
-            '',                 // I = Equipment_Type (empty)
-            Diem_Nhan.trim(),   // J = Diem_Nhan
-            Diem_Giao.trim(),   // K = Diem_Giao
-            '',                 // L = Don_Gia_Doitac (empty)
-            '',                 // M = Phi_Khac (empty)
-            '',                 // N = Don_Gia_NCC (empty)
-            '',                 // O = Phat_Sinh (empty)
-            Du_An.trim(),       // P = Doi_Tac / Du_An
-            '',                 // Q = NCC (empty)
-            'Chưa Có Xe',       // R = Tinh_Trang (default)
-            noteWithSDT,        // S = Note (ghi chú + SĐT)
-            '',                 // T = SVD (empty)
-            '',                 // U = POD1 (empty)
-            '',                 // V = POD2 (empty)
-            '',                 // W = POD3 (empty)
-            '',                 // X = POD4 (empty)
-            '',                 // Y = CODE_TUYEN (empty)
-            NV_Update.trim(),   // Z = NV_Update
+            bangkeId,                     // Col 1: ID
+            ngayFormatted,                // Col 2: Ngay
+            Du_An.trim(),                 // Col 3: Du_An
+            Diem_Nhan.trim(),             // Col 4: Diem_Nhan
+            0,                            // Col 5: Tai_Tong (0, computed later from trips)
+            0,                            // Col 6: Don_Gia_KH (computed)
+            0,                            // Col 7: Don_Gia_NCC (computed)
+            0,                            // Col 8: Loi_Nhuan (computed)
+            (Note || '').trim(),          // Col 9: Note
+            NV_Update.trim(),             // Col 10: NV_Update
+            Trong_Luong || '',            // Col 11: Trong_Luong
         ];
 
         // ── Try GAS webhook first ──
         const GAS_URL = (process.env.TMS_GAS_URL || '').trim();
 
         if (GAS_URL) {
-            // GAS write via text/plain POST (no CORS preflight)
             const gasPayload = {
-                action: 'addPhieuBK',
+                action: 'createPhieuBK',
                 sheetName: '1.Data_Xe_PhieuBK',
                 rowData: row,
                 bangkeId,
+                // Also send structured data for GAS to process
+                ID: bangkeId,
+                Ngay: ngayFormatted,
+                Du_An: Du_An.trim(),
+                Diem_Nhan: Diem_Nhan.trim(),
+                Tai_Tong: 0,
+                Don_Gia_KH: 0,
+                Don_Gia_NCC: 0,
+                Loi_Nhuan: 0,
+                Note: (Note || '').trim(),
+                NV_Update: NV_Update.trim(),
+                Trong_Luong: Trong_Luong || '',
             };
 
             const gasRes = await fetch(GAS_URL, {
@@ -114,7 +103,7 @@ export async function POST(request: NextRequest) {
         const TMS_SHEET_ID = '13WVfTdZD4lzhoEeFINM3TsRmg0cz1DFpQ9Jut1MYP1U';
 
         if (SHEETS_KEY) {
-            const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${TMS_SHEET_ID}/values/1.Data_Xe_PhieuBK!A:Z:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&key=${SHEETS_KEY}`;
+            const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${TMS_SHEET_ID}/values/1.Data_Xe_PhieuBK!A:K:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&key=${SHEETS_KEY}`;
 
             const sheetsRes = await fetch(appendUrl, {
                 method: 'POST',
@@ -136,7 +125,7 @@ export async function POST(request: NextRequest) {
             });
         }
 
-        // ── No write endpoint configured: return mock success in dev ──
+        // ── Dev mock ──
         if (process.env.NODE_ENV === 'development') {
             console.warn('[DEV] No TMS_GAS_URL or GOOGLE_SHEETS_API_KEY configured. Simulating write success.');
             await new Promise(r => setTimeout(r, 600));
