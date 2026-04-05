@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { useERPAuth } from '@/lib/auth';
 import {
@@ -70,6 +70,93 @@ function inputStyle(readonly = false): React.CSSProperties {
   };
 }
 
+// ═══════════════════════════════════════
+// COMBOBOX COMPONENT — searchable dropdown
+// ═══════════════════════════════════════
+function ComboBox({ value, onChange, options, placeholder, style }: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  placeholder?: string;
+  style?: React.CSSProperties;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Normalize Vietnamese diacritics for search
+  const normalizeVN = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return options.slice(0, 50); // show first 50 when no search
+    const q = normalizeVN(search);
+    return options.filter(o => normalizeVN(o).includes(q)).slice(0, 50);
+  }, [search, options]);
+
+  return (
+    <div ref={ref} style={{ position: 'relative', ...style }}>
+      <div style={{ position: 'relative' }}>
+        <input
+          ref={inputRef}
+          value={open ? search : value}
+          onChange={e => { setSearch(e.target.value); onChange(e.target.value); if (!open) setOpen(true); }}
+          onFocus={() => { setOpen(true); setSearch(value); }}
+          placeholder={placeholder}
+          style={{ ...inputStyle(), paddingRight: 28 }}
+          autoComplete="off"
+        />
+        <button
+          type="button"
+          onClick={() => { setOpen(!open); if (!open) { setSearch(value); inputRef.current?.focus(); } }}
+          style={{
+            position: 'absolute', right: 2, top: '50%', transform: 'translateY(-50%)',
+            width: 24, height: 24, border: 'none', background: 'transparent',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <ChevronDown size={13} color={C.muted} style={{ transition: 'transform 0.15s', transform: open ? 'rotate(180deg)' : 'none' }} />
+        </button>
+      </div>
+      {open && filtered.length > 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
+          marginTop: 2, maxHeight: 200, overflowY: 'auto',
+          background: '#fff', borderRadius: 8, border: `1px solid ${C.border}`,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+        }}>
+          {filtered.map((opt, i) => (
+            <div
+              key={`${opt}-${i}`}
+              onMouseDown={e => { e.preventDefault(); onChange(opt); setOpen(false); setSearch(''); }}
+              style={{
+                padding: '7px 10px', fontSize: 12, cursor: 'pointer',
+                background: opt === value ? '#EFF6FF' : 'transparent',
+                color: opt === value ? C.primary : C.text,
+                fontWeight: opt === value ? 600 : 400,
+                borderBottom: i < filtered.length - 1 ? `1px solid #F3F4F6` : 'none',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = '#F8FAFC')}
+              onMouseLeave={e => (e.currentTarget.style.background = opt === value ? '#EFF6FF' : 'transparent')}
+            >
+              {opt}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface Trip {
   ID: string; ID_PXK: string;
   Bien_So: string; Tai_Xe: string; SĐT_Tai_Xe?: string;
@@ -92,20 +179,31 @@ interface Booking {
   So_Chuyen: number;
   Tong_Thu: number; Tong_Tra_NCC: number; Tong_Phat_Sinh: number; Profit: number;
   NCCs: string[]; trips: Trip[];
+  Diem_Nhan?: string;
+}
+
+// ─── Suggestions data shape ───
+interface Suggestions {
+  diemGiao: string[];
+  ncc: string[];
+  bienSo: string[];
+  taiXe: string[];
+  phoneMap: Record<string, { taiXe: string; sdt: string }>;
+  driverMap: Record<string, string>;
 }
 
 // ═══════════════════════════════════════
-// ADD TRIP MODAL
+// ADD TRIP MODAL with Smart Suggestions
 // ═══════════════════════════════════════
-function AddTripModal({ bangkeId, ngay, onClose, onSaved }: {
-  bangkeId: string; ngay: string;
+function AddTripModal({ bangkeId, ngay, diemNhan, onClose, onSaved }: {
+  bangkeId: string; ngay: string; diemNhan: string;
   onClose: () => void; onSaved: () => void;
 }) {
   const { user } = useERPAuth();
   const [form, setForm] = useState({
     Ngay: ngay || getTodayISO(),
     Thoi_Gian_BK: new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 16),
-    Dia_Chi_Nhan: '',
+    Dia_Chi_Nhan: diemNhan || '',  // ← Auto-fill from parent booking
     Dia_Chi_Giao: '',
     NCC: '',
     Bien_So: '',
@@ -121,8 +219,55 @@ function AddTripModal({ bangkeId, ngay, onClose, onSaved }: {
   const [podFiles, setPodFiles] = useState<string[]>(['', '', '', '']);
   const overlayRef = useRef<HTMLDivElement>(null);
 
+  // ── Suggestions state ──
+  const [suggestions, setSuggestions] = useState<Suggestions | null>(null);
+  const [sugLoading, setSugLoading] = useState(true);
+
+  // ── Fetch suggestions on mount ──
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/tms/suggestions');
+        const json = await res.json();
+        if (!cancelled && json.success) {
+          setSuggestions(json.data);
+        }
+      } catch (e) {
+        console.error('Failed to load suggestions:', e);
+      } finally {
+        if (!cancelled) setSugLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const setF = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
     setForm(p => ({ ...p, [k]: e.target.value }));
+
+  // ── Auto-fill logic: Biển Số → Tài Xế + SĐT ──
+  const handleBienSoChange = (v: string) => {
+    setForm(p => {
+      const updated: typeof p = { ...p, Bien_So: v };
+      if (suggestions?.phoneMap[v]) {
+        const match = suggestions.phoneMap[v];
+        if (match.taiXe && !p.Tai_Xe) updated.Tai_Xe = match.taiXe;
+        if (match.sdt && !p.SDT_Tai_Xe) updated.SDT_Tai_Xe = match.sdt;
+      }
+      return updated;
+    });
+  };
+
+  // ── Auto-fill logic: Tài Xế → SĐT ──
+  const handleTaiXeChange = (v: string) => {
+    setForm(p => {
+      const updated: typeof p = { ...p, Tai_Xe: v };
+      if (suggestions?.driverMap[v] && !p.SDT_Tai_Xe) {
+        updated.SDT_Tai_Xe = suggestions.driverMap[v];
+      }
+      return updated;
+    });
+  };
 
   const handleSave = async () => {
     if (!form.Dia_Chi_Nhan.trim()) { setErr('Vui lòng nhập điểm nhận hàng'); return; }
@@ -146,6 +291,16 @@ function AddTripModal({ bangkeId, ngay, onClose, onSaved }: {
       background: color, color: '#fff', flexShrink: 0, marginRight: 4,
     }}>{letter}</span>
   );
+
+  // Loading dots for suggestions
+  const SugBadge = () => sugLoading ? (
+    <span style={{ fontSize: 10, color: C.muted, marginLeft: 4, fontStyle: 'italic' }}>đang tải gợi ý...</span>
+  ) : suggestions ? (
+    <span style={{
+      fontSize: 9, color: '#16A34A', marginLeft: 4, background: '#F0FDF4',
+      padding: '1px 6px', borderRadius: 4, fontWeight: 600,
+    }}>✓ Có gợi ý</span>
+  ) : null;
 
   return (
     <div
@@ -203,39 +358,47 @@ function AddTripModal({ bangkeId, ngay, onClose, onSaved }: {
               <MapPin size={11} /> ĐỊA CHỈ &amp; KM (BẮT BUỘC)
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              {/* Điểm Nhận */}
+              {/* Điểm Nhận — auto-filled from parent booking, editable */}
               <div>
                 <label style={{ display: 'flex', alignItems: 'center', fontSize: 11, fontWeight: 500, color: C.secondary, marginBottom: 4 }}>
                   <CircleBadge letter="A" color="#16A34A" /> Điểm Nhận *
+                  {diemNhan && (
+                    <span style={{ fontSize: 9, color: '#16A34A', marginLeft: 4, background: '#F0FDF4', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
+                      tự động
+                    </span>
+                  )}
                 </label>
                 <div style={{ position: 'relative' }}>
-                  <input
-                    value={form.Dia_Chi_Nhan} onChange={setF('Dia_Chi_Nhan')}
+                  <ComboBox
+                    value={form.Dia_Chi_Nhan}
+                    onChange={v => setForm(p => ({ ...p, Dia_Chi_Nhan: v }))}
+                    options={suggestions?.diemGiao || []}
                     placeholder="Địa chỉ / Maps link..."
-                    style={{ ...inputStyle(), paddingRight: 36 }}
                   />
                   {isMapUrl(form.Dia_Chi_Nhan) && (
                     <a href={form.Dia_Chi_Nhan} target="_blank" rel="noopener noreferrer"
-                      style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)' }}>
+                      style={{ position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)', zIndex: 5 }}>
                       <ExternalLink size={13} color={C.primary} />
                     </a>
                   )}
                 </div>
               </div>
-              {/* Điểm Giao */}
+              {/* Điểm Giao — with suggestions dropdown */}
               <div>
                 <label style={{ display: 'flex', alignItems: 'center', fontSize: 11, fontWeight: 500, color: C.secondary, marginBottom: 4 }}>
                   <CircleBadge letter="B" color="#E67E22" /> Điểm Giao *
+                  <SugBadge />
                 </label>
                 <div style={{ position: 'relative' }}>
-                  <input
-                    value={form.Dia_Chi_Giao} onChange={setF('Dia_Chi_Giao')}
-                    placeholder="Địa chỉ giao hàng..."
-                    style={{ ...inputStyle(), paddingRight: 36 }}
+                  <ComboBox
+                    value={form.Dia_Chi_Giao}
+                    onChange={v => setForm(p => ({ ...p, Dia_Chi_Giao: v }))}
+                    options={suggestions?.diemGiao || []}
+                    placeholder="Tìm hoặc nhập địa chỉ giao..."
                   />
                   {isMapUrl(form.Dia_Chi_Giao) && (
                     <a href={form.Dia_Chi_Giao} target="_blank" rel="noopener noreferrer"
-                      style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)' }}>
+                      style={{ position: 'absolute', right: 30, top: '50%', transform: 'translateY(-50%)', zIndex: 5 }}>
                       <ExternalLink size={13} color={C.primary} />
                     </a>
                   )}
@@ -249,15 +412,36 @@ function AddTripModal({ bangkeId, ngay, onClose, onSaved }: {
             <SectionLabel>🚛 Thông tin xe</SectionLabel>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr 1fr', gap: 12 }}>
               <Field label="NCC">
-                <input value={form.NCC} onChange={setF('NCC')} placeholder="Nhà cung cấp..." style={inputStyle()} />
+                <ComboBox
+                  value={form.NCC}
+                  onChange={v => setForm(p => ({ ...p, NCC: v }))}
+                  options={suggestions?.ncc || []}
+                  placeholder="Nhà cung cấp..."
+                />
               </Field>
               <Field label="Biển Số">
-                <input value={form.Bien_So} onChange={setF('Bien_So')} placeholder="Chọn hoặc nhập mới..." style={inputStyle()} />
+                <ComboBox
+                  value={form.Bien_So}
+                  onChange={handleBienSoChange}
+                  options={suggestions?.bienSo || []}
+                  placeholder="Chọn hoặc nhập mới..."
+                />
               </Field>
               <Field label="Loại Xe YC">
                 <input value={form.Loai_Xe_YC} onChange={setF('Loai_Xe_YC')} placeholder="Loại xe..." style={inputStyle()} />
               </Field>
             </div>
+            {/* Auto-fill hint */}
+            {form.Bien_So && suggestions?.phoneMap[form.Bien_So] && (
+              <div style={{
+                marginTop: 6, fontSize: 10, color: '#16A34A', background: '#F0FDF4',
+                padding: '4px 8px', borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 4,
+              }}>
+                <CheckCircle2 size={10} />
+                Đã tìm thấy thông tin xe: Tài xế <strong>{suggestions.phoneMap[form.Bien_So].taiXe || '—'}</strong>
+                {suggestions.phoneMap[form.Bien_So].sdt && <> | SĐT <strong>{suggestions.phoneMap[form.Bien_So].sdt}</strong></>}
+              </div>
+            )}
           </div>
 
           {/* ── TÀI XẾ ── */}
@@ -265,10 +449,27 @@ function AddTripModal({ bangkeId, ngay, onClose, onSaved }: {
             <SectionLabel>👤 Tài xế</SectionLabel>
             <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', gap: 12 }}>
               <Field label="Tài Xế">
-                <input value={form.Tai_Xe} onChange={setF('Tai_Xe')} placeholder="Tên tài xế..." style={inputStyle()} />
+                <ComboBox
+                  value={form.Tai_Xe}
+                  onChange={handleTaiXeChange}
+                  options={suggestions?.taiXe || []}
+                  placeholder="Tên tài xế..."
+                />
               </Field>
               <Field label="SĐT Tài Xế">
-                <input type="tel" value={form.SDT_Tai_Xe} onChange={setF('SDT_Tai_Xe')} placeholder="0xxx..." style={inputStyle()} />
+                <div style={{ position: 'relative' }}>
+                  <input
+                    type="tel" value={form.SDT_Tai_Xe} onChange={setF('SDT_Tai_Xe')}
+                    placeholder="0xxx..."
+                    style={inputStyle()}
+                  />
+                  {form.SDT_Tai_Xe && form.SDT_Tai_Xe !== '' && (
+                    <span style={{
+                      position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                      fontSize: 9, color: '#16A34A', fontWeight: 600,
+                    }}>✓</span>
+                  )}
+                </div>
               </Field>
               <Field label="Trạng Thái (tự động)">
                 <div style={{
@@ -468,6 +669,9 @@ export default function BookingDetailPage() {
   const donGiaNCC = bk.Tong_Tra_NCC;
   const trips = bk.trips || [];
 
+  // Derive Diem_Nhan from first trip or booking-level data
+  const parentDiemNhan = bk.Diem_Nhan || trips[0]?.Dia_Chi_Nhan || '';
+
   return (
     <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 0 40px', background: C.bg, minHeight: '100%' }}>
 
@@ -569,7 +773,7 @@ export default function BookingDetailPage() {
         {/* Row 3: Điểm Nhận | Trọng Lượng | NV Update */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 130px 1fr', gap: 12, marginBottom: 14 }}>
           <Field label="Điểm Nhận">
-            <input value={trips[0]?.Dia_Chi_Nhan || ''} readOnly style={inputStyle(true)} />
+            <input value={parentDiemNhan} readOnly style={inputStyle(true)} />
           </Field>
           <Field label="Trọng Lượng">
             <input value={trips[0]?.Trong_Luong || ''} readOnly style={inputStyle(true)} />
@@ -750,11 +954,12 @@ export default function BookingDetailPage() {
         )}
       </div>
 
-      {/* Add Trip Modal */}
+      {/* Add Trip Modal — now receives diemNhan from parent booking */}
       {showModal && (
         <AddTripModal
           bangkeId={bk.ID_CODE}
           ngay={bk.Ngay}
+          diemNhan={parentDiemNhan}
           onClose={() => setShowModal(false)}
           onSaved={() => { setShowModal(false); fetchBooking(); }}
         />

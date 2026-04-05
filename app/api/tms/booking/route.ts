@@ -143,6 +143,7 @@ export async function GET(request: NextRequest) {
                 Ngay: phieu.Ngay || '',
                 Du_An: phieu.Du_An || '',
                 Doi_Tac: phieu.Du_An || '',  // Du_An is the partner/project name
+                Diem_Nhan: phieu.Diem_Nhan || '',  // Parent-level pickup address
                 Tinh_Trang: tinhTrang,
                 NV_Update: phieu.NV_Update || '',
                 NV_MaNV: nv.maNV,
