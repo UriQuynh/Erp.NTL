@@ -1,8 +1,10 @@
 'use client';
 
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { HCM_TRUCK_RESTRICTIONS } from '@/lib/truck-restrictions';
+import type { RestrictionWarning } from '@/lib/truck-restrictions';
 
 // ─── Route colors (must match parent) ───
 const ROUTE_COLORS = [
@@ -17,12 +19,15 @@ interface RouteResult {
   stops: LatLng[];
   totalKm: number;
   googleMapsUrl: string;
+  warnings: RestrictionWarning[];
 }
 
 interface Props {
   origin: { lat: number; lng: number; label: string; raw: string } | null;
   destinations: LatLng[];
   routes: RouteResult[];
+  showTraffic: boolean;
+  showRestrictions: boolean;
 }
 
 // ─── Custom marker icons ───
@@ -58,13 +63,14 @@ function createNumberIcon(num: number, color: string): L.DivIcon {
   });
 }
 
-export default function LeafletMap({ origin, destinations, routes }: Props) {
+export default function LeafletMap({ origin, destinations, routes, showTraffic, showRestrictions }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<L.LayerGroup | null>(null);
   const polylinesRef = useRef<L.LayerGroup | null>(null);
+  const trafficLayerRef = useRef<L.TileLayer | null>(null);
+  const restrictionLayerRef = useRef<L.LayerGroup | null>(null);
 
-  // HCM default center
   const defaultCenter: [number, number] = [10.7626, 106.6601];
 
   // Initialize map
@@ -82,7 +88,6 @@ export default function LeafletMap({ origin, destinations, routes }: Props) {
       maxZoom: 19,
     }).addTo(map);
 
-    // Add attribution in corner
     L.control.attribution({ position: 'bottomright', prefix: '' })
       .addAttribution('© <a href="https://www.openstreetmap.org/copyright">OSM</a>')
       .addTo(map);
@@ -90,6 +95,7 @@ export default function LeafletMap({ origin, destinations, routes }: Props) {
     mapRef.current = map;
     markersRef.current = L.layerGroup().addTo(map);
     polylinesRef.current = L.layerGroup().addTo(map);
+    restrictionLayerRef.current = L.layerGroup().addTo(map);
 
     return () => {
       map.remove();
@@ -97,20 +103,103 @@ export default function LeafletMap({ origin, destinations, routes }: Props) {
     };
   }, []);
 
-  // Update markers and polylines
+  // ── Toggle Traffic Layer ──
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (showTraffic) {
+      if (!trafficLayerRef.current) {
+        // Google Traffic tiles (mutex tiles)
+        trafficLayerRef.current = L.tileLayer(
+          'https://{s}.google.com/vt/lyrs=m@221097413,traffic&x={x}&y={y}&z={z}',
+          {
+            maxZoom: 20,
+            subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+            opacity: 0.7,
+          }
+        );
+      }
+      trafficLayerRef.current.addTo(map);
+    } else {
+      if (trafficLayerRef.current) {
+        map.removeLayer(trafficLayerRef.current);
+      }
+    }
+  }, [showTraffic]);
+
+  // ── Toggle Restriction Zones ──
+  useEffect(() => {
+    const layer = restrictionLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+
+    if (!showRestrictions) return;
+
+    HCM_TRUCK_RESTRICTIONS.forEach(r => {
+      // Draw restricted road as red dashed polyline
+      const polyline = L.polyline(r.path, {
+        color: '#DC2626',
+        weight: 5,
+        opacity: 0.55,
+        dashArray: '10 6',
+        lineCap: 'round',
+      });
+      polyline.bindPopup(`
+        <div style="min-width:200px">
+          <div style="font-size:13px;font-weight:700;color:#DC2626;margin-bottom:4px">
+            ⛔ ${r.streetName}
+          </div>
+          <div style="font-size:11px;color:#374151;line-height:1.5">
+            ${r.description}<br/>
+            <b>Giờ cấm:</b> ${r.restrictedTimes.join(', ')}<br/>
+            <b>Tải trọng:</b> > ${(r.maxWeight / 1000).toFixed(1)}T
+          </div>
+        </div>
+      `);
+      layer.addLayer(polyline);
+
+      // Add small warning icon at midpoint of the restriction
+      const mid = r.path[Math.floor(r.path.length / 2)];
+      const icon = L.divIcon({
+        className: '',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+        html: `<div style="
+          width:22px; height:22px; border-radius:5px;
+          background:#DC2626; border:2px solid #fff;
+          box-shadow:0 1px 4px rgba(0,0,0,0.3);
+          display:flex; align-items:center; justify-content:center;
+          font-size:12px; cursor:pointer;
+        ">⛔</div>`,
+      });
+      const marker = L.marker(mid, { icon });
+      marker.bindPopup(`
+        <div style="min-width:180px">
+          <div style="font-size:12px;font-weight:700;color:#DC2626">⛔ ${r.streetName}</div>
+          <div style="font-size:11px;color:#6B7280;margin-top:2px">
+            Cấm ${r.restrictedTimes.join(', ')}<br/>
+            Tải trọng > ${(r.maxWeight / 1000).toFixed(1)}T
+          </div>
+        </div>
+      `);
+      layer.addLayer(marker);
+    });
+  }, [showRestrictions]);
+
+  // ── Update markers and polylines ──
   useEffect(() => {
     const map = mapRef.current;
     const markers = markersRef.current;
     const polylines = polylinesRef.current;
     if (!map || !markers || !polylines) return;
 
-    // Clear existing layers
     markers.clearLayers();
     polylines.clearLayers();
 
     const bounds = L.latLngBounds([]);
 
-    // Add origin marker (red)
+    // Origin marker (red)
     if (origin) {
       const marker = L.marker([origin.lat, origin.lng], {
         icon: createIcon('#DC2626', 32),
@@ -119,20 +208,19 @@ export default function LeafletMap({ origin, destinations, routes }: Props) {
       bounds.extend([origin.lat, origin.lng]);
     }
 
-    // If routes exist, draw route-specific markers + polylines
     if (routes.length > 0 && origin) {
       routes.forEach((route, ri) => {
         const color = ROUTE_COLORS[ri % ROUTE_COLORS.length];
-
-        // Polyline: origin → stops
         const linePoints: [number, number][] = [[origin.lat, origin.lng]];
 
         route.stops.forEach((stop, si) => {
+          const hasWarning = route.warnings.length > 0;
           const marker = L.marker([stop.lat, stop.lng], {
             icon: createNumberIcon(si + 1, color),
           }).bindPopup(`
             <b style="font-size:12px;color:${color}">Xe ${ri + 1} — ${stop.label}</b>
             <br><span style="font-size:11px">${stop.lat.toFixed(5)}, ${stop.lng.toFixed(5)}</span>
+            ${hasWarning ? '<br><span style="font-size:11px;color:#DC2626">⚠️ Có cảnh báo cấm tải</span>' : ''}
           `);
           markers.addLayer(marker);
           bounds.extend([stop.lat, stop.lng]);
@@ -142,14 +230,14 @@ export default function LeafletMap({ origin, destinations, routes }: Props) {
         // Draw polyline
         const polyline = L.polyline(linePoints, {
           color,
-          weight: 3,
-          opacity: 0.75,
+          weight: 3.5,
+          opacity: 0.8,
           dashArray: ri > 0 ? '8 4' : undefined,
         });
         polylines.addLayer(polyline);
       });
     } else {
-      // No routes yet, just show destination markers (yellow)
+      // No routes, show yellow destination markers
       destinations.forEach((dest, i) => {
         const marker = L.marker([dest.lat, dest.lng], {
           icon: createNumberIcon(i + 1, '#F59E0B'),
@@ -159,7 +247,6 @@ export default function LeafletMap({ origin, destinations, routes }: Props) {
       });
     }
 
-    // Fit bounds
     if (bounds.isValid()) {
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 15, animate: true, duration: 0.5 });
     }
