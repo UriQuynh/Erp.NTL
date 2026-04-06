@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useERPAuth } from '@/lib/auth';
 import {
@@ -63,27 +63,80 @@ interface BookingRow {
   trips: { Trong_Luong?: string; Loai_Xe?: string; Dia_Chi_Nhan?: string; Don_Gia_NCC?: number }[];
 }
 
-// Day quick filters
-const DAY_FILTERS = [
-  { key: 'today', label: 'Hôm nay', days: 0 },
-  { key: '3d', label: '3 ngày', days: 3 },
-  { key: '7d', label: '7 ngày', days: 7 },
-  { key: '30d', label: '30 ngày', days: 30 },
-  { key: 'month', label: 'Tháng này', days: -1 },
-  { key: 'all', label: 'Tất cả', days: -2 },
-];
-
+// ─── GMT+7 Date Helpers ───
+/** Get today's date in GMT+7 timezone */
+function getTodayVN(): Date {
+  const now = new Date(Date.now() + 7 * 60 * 60 * 1000);
+  return new Date(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+}
+/** Format Date → yyyy-mm-dd (for <input type="date">) */
+function toInputDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+/** Format Date → dd/mm/yyyy */
+function formatDateVN(d: Date) {
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+/** Parse dd/mm/yyyy or yyyy-mm-dd → Date */
 function parseVNDate(s: string): Date | null {
   if (!s) return null;
-  // Support dd/mm/yyyy and yyyy-mm-dd
   const parts = s.includes('/') ? s.split('/') : s.split('-');
   if (parts.length !== 3) return null;
   const [a, b, c] = parts.map(Number);
-  if (s.includes('/')) return new Date(c, b - 1, a); // dd/mm/yyyy
-  return new Date(a, b - 1, c); // yyyy-mm-dd
+  if (s.includes('/')) return new Date(c, b - 1, a);
+  return new Date(a, b - 1, c);
 }
-function formatDateVN(d: Date) {
-  return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+
+// Day quick filters config
+type FilterKey = 'today' | '3d' | '7d' | '30d' | 'month' | 'all';
+const DAY_FILTERS: { key: FilterKey; label: string }[] = [
+  { key: 'today', label: 'Hôm nay' },
+  { key: '3d',    label: '3 ngày' },
+  { key: '7d',    label: '7 ngày' },
+  { key: '30d',   label: '30 ngày' },
+  { key: 'month', label: 'Tháng này' },
+  { key: 'all',   label: 'Tất cả' },
+];
+
+/** Compute start/end dates from a filter key */
+function getDateRange(key: FilterKey): { start: string; end: string } | null {
+  const today = getTodayVN();
+  switch (key) {
+    case 'today':
+      return { start: toInputDate(today), end: toInputDate(today) };
+    case '3d': {
+      const s = new Date(today); s.setDate(s.getDate() - 2);
+      return { start: toInputDate(s), end: toInputDate(today) };
+    }
+    case '7d': {
+      const s = new Date(today); s.setDate(s.getDate() - 6);
+      return { start: toInputDate(s), end: toInputDate(today) };
+    }
+    case '30d': {
+      const s = new Date(today); s.setDate(s.getDate() - 29);
+      return { start: toInputDate(s), end: toInputDate(today) };
+    }
+    case 'month': {
+      const s = new Date(today.getFullYear(), today.getMonth(), 1);
+      const e = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+      return { start: toInputDate(s), end: toInputDate(e) };
+    }
+    case 'all':
+      return null; // no range
+  }
+}
+
+/** Check if a date range matches a filter key exactly */
+function detectFilterFromDates(start: string, end: string): FilterKey | null {
+  for (const f of DAY_FILTERS) {
+    if (f.key === 'all') continue;
+    const range = getDateRange(f.key);
+    if (range && range.start === start && range.end === end) return f.key;
+  }
+  return null;
 }
 
 export default function BookingListPage() {
@@ -94,23 +147,74 @@ export default function BookingListPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-  const [dayFilter, setDayFilter] = useState('3d');
-  const [selectedDate, setSelectedDate] = useState<string | null>(null); // from sidebar
   const [statusFilter, setStatusFilter] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
+
+  // ─── Date filter state (two-way sync) ───
+  const initRange = getDateRange('3d')!;
+  const [dayFilter, setDayFilter] = useState<FilterKey>('3d');
+  const [dateStart, setDateStart] = useState(initRange.start);
+  const [dateEnd, setDateEnd] = useState(initRange.end);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null); // sidebar single-date
+
+  // Track table data version for fade-in animation
+  const [tableKey, setTableKey] = useState(0);
 
   const fetchData = useCallback(async () => {
     setLoading(true); setError('');
     try {
       const res = await fetch('/api/tms/booking');
       const json = await res.json();
-      if (json.success) setBookings(json.data || []);
+      if (json.success) {
+        setBookings(json.data || []);
+        setTableKey(k => k + 1);
+      }
       else setError(json.error || 'Lỗi tải dữ liệu');
     } catch { setError('Không kết nối được server'); }
     finally { setLoading(false); }
   }, []);
 
   useEffect(() => { if (isAuthenticated) fetchData(); }, [isAuthenticated, fetchData]);
+
+  // ─── Quick Filter → Date Range sync ───
+  const handleQuickFilter = useCallback((key: FilterKey) => {
+    setSelectedDate(null); // clear sidebar selection
+    setDayFilter(key);
+    const range = getDateRange(key);
+    if (range) {
+      setDateStart(range.start);
+      setDateEnd(range.end);
+    } else {
+      // "all" = clear dates
+      setDateStart('');
+      setDateEnd('');
+    }
+    setTableKey(k => k + 1);
+  }, []);
+
+  // ─── Manual Date → Quick Filter reverse-detect ───
+  const handleDateStartChange = useCallback((v: string) => {
+    setDateStart(v);
+    setSelectedDate(null);
+    const match = v && dateEnd ? detectFilterFromDates(v, dateEnd) : null;
+    setDayFilter(match || (v || dateEnd ? 'all' : 'all'));
+    // If both dates set and valid custom range, treat as custom (don't match any pill)
+    if (!match && v && dateEnd) {
+      setDayFilter('all'); // no pill active for custom range
+    }
+    setTableKey(k => k + 1);
+  }, [dateEnd]);
+
+  const handleDateEndChange = useCallback((v: string) => {
+    setDateEnd(v);
+    setSelectedDate(null);
+    const match = dateStart && v ? detectFilterFromDates(dateStart, v) : null;
+    setDayFilter(match || (dateStart || v ? 'all' : 'all'));
+    if (!match && dateStart && v) {
+      setDayFilter('all');
+    }
+    setTableKey(k => k + 1);
+  }, [dateStart]);
 
   // ─── Date sidebar groups ───
   const dateCounts = useMemo(() => {
@@ -130,26 +234,23 @@ export default function BookingListPage() {
 
   // ─── Apply filters ───
   const filtered = useMemo(() => {
-    const now = new Date(); now.setHours(0, 0, 0, 0);
     return bookings.filter(b => {
-      // Day filter from sidebar
+      // Sidebar single-date selection (highest priority)
       if (selectedDate) {
         const d = parseVNDate(b.Ngay);
         if (!d || formatDateVN(d) !== selectedDate) return false;
-      } else {
-        // Quick filter
+      } else if (dateStart || dateEnd) {
+        // Date range filter
         const d = parseVNDate(b.Ngay);
-        if (dayFilter !== 'all') {
-          if (!d) return false;
-          if (dayFilter === 'today') {
-            if (d.toDateString() !== now.toDateString()) return false;
-          } else if (dayFilter === 'month') {
-            if (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear()) return false;
-          } else {
-            const days = DAY_FILTERS.find(f => f.key === dayFilter)?.days || 7;
-            const cutoff = new Date(now); cutoff.setDate(cutoff.getDate() - days);
-            if (d < cutoff || d > now) return false;
-          }
+        if (!d) return false;
+        d.setHours(0, 0, 0, 0);
+        if (dateStart) {
+          const s = new Date(dateStart + 'T00:00:00');
+          if (d < s) return false;
+        }
+        if (dateEnd) {
+          const e = new Date(dateEnd + 'T00:00:00');
+          if (d > e) return false;
         }
       }
       // Status filter
@@ -165,7 +266,7 @@ export default function BookingListPage() {
       }
       return true;
     });
-  }, [bookings, dayFilter, selectedDate, statusFilter, search]);
+  }, [bookings, dateStart, dateEnd, selectedDate, statusFilter, search]);
 
   // ─── Stats ───
   const stats = useMemo(() => ({
@@ -185,6 +286,15 @@ export default function BookingListPage() {
 
   if (!isAuthenticated) return null;
 
+  // Detect if a quick filter pill is active (for styling)
+  const isQuickActive = (key: FilterKey) => {
+    if (selectedDate) return false;
+    if (key === 'all' && !dateStart && !dateEnd) return true;
+    if (key === 'all') return false;
+    const range = getDateRange(key);
+    return range ? range.start === dateStart && range.end === dateEnd : false;
+  };
+
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - 120px)', overflow: 'hidden', gap: 0, background: CLR.bg }}>
 
@@ -200,12 +310,12 @@ export default function BookingListPage() {
 
         {/* "All" row */}
         <button
-          onClick={() => { setSelectedDate(null); setDayFilter('all'); }}
+          onClick={() => { setSelectedDate(null); handleQuickFilter('all'); }}
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            width: '100%', padding: '8px 14px', fontSize: 13, fontWeight: selectedDate === null && dayFilter === 'all' ? 700 : 400,
-            color: selectedDate === null && dayFilter === 'all' ? CLR.primary : CLR.text,
-            background: selectedDate === null && dayFilter === 'all' ? '#EEF2FF' : 'transparent',
+            width: '100%', padding: '8px 14px', fontSize: 13, fontWeight: selectedDate === null && !dateStart && !dateEnd ? 700 : 400,
+            color: selectedDate === null && !dateStart && !dateEnd ? CLR.primary : CLR.text,
+            background: selectedDate === null && !dateStart && !dateEnd ? '#EEF2FF' : 'transparent',
             border: 'none', cursor: 'pointer', textAlign: 'left',
           }}
         >
@@ -221,7 +331,22 @@ export default function BookingListPage() {
           return (
             <button
               key={date}
-              onClick={() => { setSelectedDate(active ? null : date); setDayFilter('all'); }}
+              onClick={() => {
+                if (active) {
+                  setSelectedDate(null);
+                  handleQuickFilter('3d'); // reset to default
+                } else {
+                  setSelectedDate(date);
+                  setDayFilter('all');
+                  // Set date inputs to single day
+                  const d = parseVNDate(date);
+                  if (d) {
+                    setDateStart(toInputDate(d));
+                    setDateEnd(toInputDate(d));
+                  }
+                }
+                setTableKey(k => k + 1);
+              }}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                 width: '100%', padding: '8px 14px', fontSize: 12.5, fontWeight: active ? 700 : 400,
@@ -252,24 +377,49 @@ export default function BookingListPage() {
           padding: '10px 20px', background: CLR.card, borderBottom: `1px solid ${CLR.border}`,
           display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, flexWrap: 'wrap'
         }}>
-          {/* Day filter pills */}
+          {/* Quick filter pills (Yellow) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <Calendar size={14} color={CLR.secondary} style={{ marginRight: 2 }} />
             {DAY_FILTERS.map(f => {
-              const active = !selectedDate && dayFilter === f.key;
+              const active = isQuickActive(f.key);
               return (
                 <button
                   key={f.key}
-                  onClick={() => { setDayFilter(f.key); setSelectedDate(null); }}
+                  onClick={() => handleQuickFilter(f.key)}
                   style={{
                     height: 30, padding: '0 10px', fontSize: 12, fontWeight: active ? 700 : 500,
                     borderRadius: 6, border: active ? 'none' : `1px solid ${CLR.border}`,
-                    background: active ? CLR.primary : CLR.card, color: active ? '#fff' : CLR.secondary,
-                    cursor: 'pointer', transition: 'all 0.12s', letterSpacing: '0.01em',
+                    background: active ? '#1D354D' : CLR.card, color: active ? '#fff' : CLR.secondary,
+                    cursor: 'pointer', transition: 'all 0.15s', letterSpacing: '0.01em',
                   }}
                 >{f.label}</button>
               );
             })}
+          </div>
+
+          {/* Date Range Inputs (Red) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
+            <input
+              type="date"
+              value={dateStart}
+              onChange={e => handleDateStartChange(e.target.value)}
+              style={{
+                height: 30, padding: '0 8px', fontSize: 12, borderRadius: 6,
+                border: `1px solid ${CLR.border}`, background: CLR.card, color: CLR.text,
+                outline: 'none', cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            />
+            <span style={{ fontSize: 11, color: CLR.muted, fontWeight: 500 }}>→</span>
+            <input
+              type="date"
+              value={dateEnd}
+              onChange={e => handleDateEndChange(e.target.value)}
+              style={{
+                height: 30, padding: '0 8px', fontSize: 12, borderRadius: 6,
+                border: `1px solid ${CLR.border}`, background: CLR.card, color: CLR.text,
+                outline: 'none', cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            />
           </div>
 
           <div style={{ flex: 1 }} />
@@ -374,7 +524,7 @@ export default function BookingListPage() {
         </div>
 
         {/* ── DATA TABLE ── */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '10px 20px 20px' }}>
+        <div style={{ flex: 1, overflow: 'auto', padding: '10px 20px 20px', position: 'relative' }}>
           {error && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
@@ -385,7 +535,32 @@ export default function BookingListPage() {
             </div>
           )}
 
-          <div style={{ background: CLR.card, borderRadius: 10, border: `1px solid ${CLR.border}`, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.07)' }}>
+          {/* Shimmer loading overlay */}
+          {loading && bookings.length > 0 && (
+            <div style={{
+              position: 'absolute', inset: 0, zIndex: 10,
+              background: 'rgba(255,255,255,0.6)', backdropFilter: 'blur(1px)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              borderRadius: 10,
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px',
+                background: CLR.card, borderRadius: 8, boxShadow: '0 2px 12px rgba(0,0,0,0.1)',
+              }}>
+                <RefreshCw size={16} style={{ animation: 'spin 1s linear infinite', color: CLR.primary }} />
+                <span style={{ fontSize: 13, fontWeight: 600, color: CLR.primary }}>Đang tải dữ liệu...</span>
+              </div>
+            </div>
+          )}
+
+          <div
+            key={tableKey}
+            className="animate-fade-in"
+            style={{
+              background: CLR.card, borderRadius: 10, border: `1px solid ${CLR.border}`,
+              overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.07)',
+            }}
+          >
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr style={{ background: '#FFF8EC', borderBottom: `1px solid ${CLR.border}` }}>
@@ -413,15 +588,15 @@ export default function BookingListPage() {
               </thead>
               <tbody>
                 {loading && bookings.length === 0 ? (
-                  // Skeleton
+                  // Skeleton shimmer
                   Array.from({ length: 5 }).map((_, i) => (
                     <tr key={i} style={{ borderBottom: `1px solid #F3F4F6` }}>
                       {Array.from({ length: 11 }).map((_, j) => (
                         <td key={j} style={{ padding: '11px 12px' }}>
-                          <div style={{
+                          <div className="animate-shimmer" style={{
                             height: 12, borderRadius: 4,
-                            background: `linear-gradient(90deg, #F3F4F6 0%, #E5E7EB ${50 + i * 10}%, #F3F4F6 100%)`,
-                            animation: 'pulse 1.5s ease infinite',
+                            background: `linear-gradient(90deg, #F3F4F6 25%, #E5E7EB 50%, #F3F4F6 75%)`,
+                            backgroundSize: '200% 100%',
                             width: j === 0 ? 72 : j === 10 ? 48 : '80%',
                           }} />
                         </td>
@@ -434,7 +609,7 @@ export default function BookingListPage() {
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
                         <Truck size={36} color={CLR.muted} />
                         <span style={{ fontSize: 13, color: CLR.muted, fontWeight: 500 }}>
-                          {search || statusFilter || dayFilter !== 'all' ? 'Không tìm thấy kết quả phù hợp' : 'Chưa có dữ liệu booking'}
+                          {search || statusFilter || (dateStart && dateEnd) ? 'Không tìm thấy kết quả phù hợp' : 'Chưa có dữ liệu booking'}
                         </span>
                       </div>
                     </td>
@@ -449,9 +624,11 @@ export default function BookingListPage() {
                     <tr
                       key={`${bk.ID_CODE}_${idx}`}
                       onClick={() => router.push(`/tms/booking/${encodeURIComponent(bk.ID_CODE)}`)}
+                      className="animate-fade-in-row"
                       style={{
                         borderBottom: `1px solid #F3F4F6`,
                         cursor: 'pointer', transition: 'background 0.1s',
+                        animationDelay: `${Math.min(idx * 20, 300)}ms`,
                       }}
                       onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#F8FAFF'}
                       onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
@@ -567,7 +744,27 @@ export default function BookingListPage() {
 
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeInRow {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes shimmer {
+          0% { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
+        }
+        .animate-fade-in {
+          animation: fadeIn 0.25s ease-out;
+        }
+        .animate-fade-in-row {
+          animation: fadeInRow 0.3s ease-out both;
+        }
+        .animate-shimmer {
+          animation: shimmer 1.5s ease-in-out infinite;
+        }
       `}</style>
     </div>
   );
