@@ -136,6 +136,9 @@ function doPost(e) {
       case "createChuyen":
         result = createChuyen(body);
         break;
+      case "updateChuyen":
+        result = updateChuyen(body);
+        break;
       default:
         result = { success: false, error: "Unknown POST action: " + action };
     }
@@ -360,7 +363,94 @@ function createChuyen(data) {
 }
 
 // ============================================================
-// recalcPhieuBK — Tự động cập nhật tổng phiếu BK sau khi thêm chuyến
+// updateChuyen — CẬP NHẬT CHUYẾN XE (ghi đè dòng cũ theo ID cột B)
+// ============================================================
+function updateChuyen(data) {
+  var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_NAMES.CHUYEN);
+  if (!sheet) {
+    return { success: false, error: 'Sheet "' + SHEET_NAMES.CHUYEN + '" không tồn tại' };
+  }
+
+  var chuyenId = (data.ID || "").toString().trim();
+  var bangkeId = (data.ID_PXK || data.ID_CODE || "").toString().trim();
+  if (!chuyenId) {
+    return { success: false, error: "Thiếu ID (mã chuyến để cập nhật)" };
+  }
+
+  // Tìm dòng theo ID (column B = col 2)
+  var lastRow = sheet.getLastRow();
+  var targetRow = -1;
+  if (lastRow >= 2) {
+    var ids = sheet.getRange(2, 2, lastRow - 1, 1).getValues().flat();
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i].toString().trim() === chuyenId) {
+        targetRow = i + 2; // +2: 1-indexed + skip header
+        break;
+      }
+    }
+  }
+
+  if (targetRow === -1) {
+    return { success: false, error: "Không tìm thấy chuyến ID: " + chuyenId };
+  }
+
+  // Build row 34 cột A→AH (giống createChuyen)
+  var row = [
+    bangkeId,                                    //  0 A
+    chuyenId,                                    //  1 B
+    data.Ngay                 || "",             //  2 C
+    data.Du_An                || "",             //  3 D
+    data.Dia_Chi_Nhan         || "",             //  4 E
+    data.Dia_Chi_Giao         || "",             //  5 F
+    data.Nguoi_YC             || "",             //  6 G
+    data.Thoi_Gian_BK         || "",             //  7 H
+    data.Thoi_Gian_Den        || "",             //  8 I
+    data.Thoi_Gian_Xuat       || "",             //  9 J
+    data.Thoi_Gian_DenKho     || "",             // 10 K
+    data.Thoi_Gian_HoanThanh  || "",             // 11 L
+    data.Loai_Hang            || "",             // 12 M
+    data.Thong_Tin            || "",             // 13 N
+    data.So_Bill              || "",             // 14 O
+    data.Bien_So              || "",             // 15 P
+    data.Loai_Xe              || "",             // 16 Q
+    data.Loai_xe_YC           || "",             // 17 R
+    data.Hinh_Anh1            || "",             // 18 S
+    data.Hinh_Anh2            || "",             // 19 T
+    data.Hinh_Anh3            || "",             // 20 U
+    data.Hinh_Anh4            || "",             // 21 V
+    data.Trang_Thai           || "Chờ cập nhật",// 22 W
+    data.Tai_Xe               || "",             // 23 X
+    toNumber(data.Trong_Luong),                  // 24 Y
+    data.Leadtime             || "",             // 25 Z
+    data.NCC                  || "",             // 26 AA
+    toNumber(data.Don_Gia),                      // 27 AB
+    toNumber(data.Phi_Khac),                     // 28 AC
+    toNumber(data.Cuoc_Thu_KH),                  // 29 AD
+    toNumber(data.Cuoc_Khac_Thu_KH),             // 30 AE
+    data.Code                 || "",             // 31 AF
+    data.Tuyen                || "",             // 32 AG
+    data.Map                  || ""              // 33 AH
+  ];
+
+  // Ghi đè 34 cột trên dòng đã tìm thấy
+  sheet.getRange(targetRow, 1, 1, 34).setValues([row]);
+
+  // Recalculate parent
+  var recalcResult = recalcPhieuBK(bangkeId);
+
+  return {
+    success    : true,
+    chuyen_id  : chuyenId,
+    phieu_id   : bangkeId,
+    row        : targetRow,
+    recalc     : recalcResult,
+    message    : "Đã cập nhật chuyến " + chuyenId + " tại dòng " + targetRow
+  };
+}
+
+// ============================================================
+// recalcPhieuBK — Tự động cập nhật tổng phiếu BK sau khi thêm/sửa chuyến
 // Đọc 1.Data_Xe_BK (34 cột) → tính tổng → ghi vào 1.Data_Xe_PhieuBK
 // ============================================================
 function recalcPhieuBK(bangkeId) {

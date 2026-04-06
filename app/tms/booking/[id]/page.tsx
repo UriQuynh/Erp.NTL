@@ -7,6 +7,7 @@ import {
   ArrowLeft, Save, Plus, X, MapPin, Truck, RefreshCw,
   Copy, Trash2, CheckCircle2, AlertCircle, ExternalLink,
   FileSpreadsheet, Upload, Camera, ChevronDown, Search,
+  Pencil,
 } from 'lucide-react';
 
 // ─── Design tokens ───
@@ -159,6 +160,7 @@ function ComboBox({ value, onChange, options, placeholder, style }: {
 
 interface Trip {
   ID: string; ID_PXK: string;
+  Ngay?: string;
   Bien_So: string; Tai_Xe: string; SĐT_Tai_Xe?: string;
   Loai_Xe: string; NCC: string; NCC_Raw: string;
   Dia_Chi_Nhan: string; Dia_Chi_Giao: string;
@@ -169,6 +171,7 @@ interface Trip {
   Trong_Luong: string;
   PODs: string[]; So_Bill?: string;
   Thoi_Gian_BK?: string;
+  Note?: string;
 }
 
 interface Booking {
@@ -205,33 +208,55 @@ interface BanggiaData {
   banggia: Array<{ ncc_id: string; ten_ncc: string; loai_xe: string; kich_thuoc: string; don_gia: number; display: string }>;
 }
 
-// ═══════════════════════════════════════
-// ADD TRIP MODAL with Smart Suggestions
-// ═══════════════════════════════════════
-function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
+// Edit trip data type
+interface EditTripData {
+  ID: string;
+  ID_PXK: string;
+  Ngay: string;
+  Dia_Chi_Nhan: string;
+  Dia_Chi_Giao: string;
+  Bien_So: string;
+  Tai_Xe: string;
+  SDT_Tai_Xe: string;
+  NCC: string;
+  Loai_Xe_YC: string;
+  Don_Gia_NCC: number;
+  Phi_Khac_NCC: number;
+  Cuoc_Thu_KH: number;
+  Cuoc_Khac_Thu_KH: number;
+  Trong_Luong: string;
+  So_Bill: string;
+  Note: string;
+  Trang_Thai: string;
+  Thoi_Gian_BK: string;
+}
+
+function AddTripModal({ bangkeId, ngay, diemNhan, duAn, editTrip, onClose, onSaved }: {
   bangkeId: string; ngay: string; diemNhan: string; duAn: string;
-  onClose: () => void; onSaved: () => void;
+  editTrip?: EditTripData | null;
+  onClose: () => void; onSaved: (msg: string) => void;
 }) {
+  const isEdit = !!editTrip;
   const { user } = useERPAuth();
   const [form, setForm] = useState({
-    Ngay: ngay || getTodayISO(),
-    Thoi_Gian_BK: new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 16),
-    Dia_Chi_Nhan: diemNhan || '',
-    Dia_Chi_Giao: '',
-    NCC: '',
-    Bien_So: '',
-    Loai_Xe_YC: '',
-    Tai_Xe: '',
-    SDT_Tai_Xe: '',
-    Trang_Thai: 'Chờ cập nhật',
-    So_Bill: '',
-    Note: '',
-    // ── Financial fields (26-col schema) ──
-    Tai_Trong: '',
-    Don_Gia_KH: '',
-    Phi_Khac_KH: '',
-    Don_Gia_NCC: '',
-    Phat_Sinh_NCC: '',
+    Ngay: editTrip?.Ngay || ngay || getTodayISO(),
+    Thoi_Gian_BK: editTrip?.Thoi_Gian_BK || new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 16),
+    Dia_Chi_Nhan: editTrip?.Dia_Chi_Nhan || diemNhan || '',
+    Dia_Chi_Giao: editTrip?.Dia_Chi_Giao || '',
+    NCC: editTrip?.NCC || '',
+    Bien_So: editTrip?.Bien_So || '',
+    Loai_Xe_YC: editTrip?.Loai_Xe_YC || '',
+    Tai_Xe: editTrip?.Tai_Xe || '',
+    SDT_Tai_Xe: editTrip?.SDT_Tai_Xe || '',
+    Trang_Thai: editTrip?.Trang_Thai || 'Chờ cập nhật',
+    So_Bill: editTrip?.So_Bill || '',
+    Note: editTrip?.Note || '',
+    // ── Financial fields (34-col schema) ──
+    Tai_Trong: editTrip?.Trong_Luong || '',
+    Don_Gia_KH: editTrip?.Cuoc_Thu_KH ? String(editTrip.Cuoc_Thu_KH) : '',
+    Phi_Khac_KH: editTrip?.Cuoc_Khac_Thu_KH ? String(editTrip.Cuoc_Khac_Thu_KH) : '',
+    Don_Gia_NCC: editTrip?.Don_Gia_NCC ? String(editTrip.Don_Gia_NCC) : '',
+    Phat_Sinh_NCC: editTrip?.Phi_Khac_NCC ? String(editTrip.Phi_Khac_NCC) : '',
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -373,14 +398,14 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
     setSaving(true); setErr('');
 
     try {
-      const chuyenId = generateHex8();
+      const chuyenId = isEdit ? editTrip!.ID : generateHex8();
       const nvUpdate = user ? `${user.maNV} - ${user.hoTen}` : '';
       // Combine Tai_Xe + SDT for column G
       const taiXeDisplay = [form.Tai_Xe, form.SDT_Tai_Xe].filter(Boolean).join(' ');
 
       // ── Build payload matching 1.Data_Xe_BK 34-col schema A→AH ──
       const payload = {
-        action          : 'createChuyen',
+        action          : isEdit ? 'updateChuyen' : 'createChuyen',
         ID_PXK          : bangkeId,                              //  0 A: FK phiếu BK
         ID              : chuyenId,                              //  1 B: trip ID
         Ngay            : toDateVN(form.Ngay),                   //  2 C: dd/mm/yyyy
@@ -392,7 +417,7 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
         So_Bill         : form.So_Bill || '',                     // 14 O: Số bill
         Bien_So         : form.Bien_So,                          // 15 P: Biển số
         Loai_xe_YC      : form.Note || form.Loai_Xe_YC || '',    // 17 R: Loại xe YC / mô tả
-        Trang_Thai      : 'Chờ cập nhật',                        // 22 W: Trạng thái
+        Trang_Thai      : form.Trang_Thai || 'Chờ cập nhật',     // 22 W: Trạng thái
         Tai_Xe          : taiXeDisplay,                          // 23 X: Tài xế
         Trong_Luong     : form.Tai_Trong || '',                  // 24 Y: Trọng lượng
         NCC             : form.NCC,                              // 26 AA: NCC
@@ -402,7 +427,7 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
         Cuoc_Khac_Thu_KH: parseFloat(form.Phi_Khac_KH) || 0,    // 30 AE: Cước khác KH
       };
 
-      console.log('[AddTrip] Payload:', JSON.stringify(payload).slice(0, 300));
+      console.log(`[${isEdit ? 'UpdateTrip' : 'AddTrip'}] Payload:`, JSON.stringify(payload).slice(0, 400));
 
       const res = await fetch('/api/tms/gas', {
         method: 'POST',
@@ -415,8 +440,11 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
         throw new Error(result.error || 'GAS trả về lỗi');
       }
 
-      console.log('[AddTrip] Success:', result);
-      onSaved(); // refresh parent + close modal
+      console.log(`[${isEdit ? 'UpdateTrip' : 'AddTrip'}] Success:`, result);
+      onSaved(isEdit
+        ? `✅ Đã cập nhật thông tin chuyến ${chuyenId} thành công!`
+        : `✅ Đã thêm chuyến ${chuyenId} thành công!`
+      );
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Lỗi lưu — vui lòng thử lại';
       setErr(msg);
@@ -460,18 +488,25 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
         width: 660, maxHeight: '92vh', overflowY: 'auto',
         background: C.card, borderRadius: 16, padding: 0,
         boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
-        animation: 'slideIn 0.25s ease',
+        animation: 'scaleUp 0.2s ease',
       }}>
         {/* Modal header sticky */}
         <div style={{
           position: 'sticky', top: 0, zIndex: 10,
-          background: C.card, borderBottom: `1px solid ${C.border}`,
+          background: isEdit ? '#FFFBEB' : C.card, borderBottom: `1px solid ${C.border}`,
           padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
         }}>
+          {/* Title */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {isEdit && <Pencil size={14} color={C.orange} />}
+            <span style={{
+              fontSize: 13, fontWeight: 700, color: isEdit ? C.orange : C.primary,
+            }}>{isEdit ? 'Cập Nhật Thông Tin Chuyến' : 'Thêm Chuyến Mới'}</span>
+          </div>
           <span style={{
             fontFamily: 'monospace', fontSize: 12, fontWeight: 700,
             background: '#F3F4F6', padding: '3px 10px', borderRadius: 6, color: C.secondary,
-          }}>{bangkeId}</span>
+          }}>{isEdit ? editTrip!.ID : bangkeId}</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.secondary }}>
             <span>Ngày:</span>
             <input type="date" value={form.Ngay} onChange={setF('Ngay')}
@@ -812,14 +847,14 @@ function AddTripModal({ bangkeId, ngay, diemNhan, duAn, onClose, onSaved }: {
             display: 'flex', alignItems: 'center', gap: 7,
             boxShadow: saving ? 'none' : '0 2px 8px rgba(30,58,95,0.3)',
           }}>
-            {saving ? <RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={14} />}
-            {saving ? 'Đang lưu...' : 'Lưu Chuyến'}
+            {saving ? <RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> : isEdit ? <Pencil size={14} /> : <Save size={14} />}
+            {saving ? 'Đang lưu...' : isEdit ? 'Cập Nhật Chuyến' : 'Lưu Chuyến'}
           </button>
         </div>
       </div>
 
       <style>{`
-        @keyframes slideIn { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes scaleUp { from { opacity:0; transform:scale(0.95); } to { opacity:1; transform:scale(1); } }
         @keyframes spin { to { transform:rotate(360deg); } }
       `}</style>
     </div>
@@ -839,8 +874,10 @@ export default function BookingDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
+  const [editTrip, setEditTrip] = useState<EditTripData | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [toast, setToast] = useState('');
 
   const fetchBooking = useCallback(async () => {
     setLoading(true); setError('');
@@ -1086,12 +1123,47 @@ export default function BookingDetailPage() {
                 {trips.map((trip, i) => {
                   const tst = getStatus(trip.Trang_Thai);
                   return (
-                    <tr key={`${trip.ID}_${i}`} style={{ borderBottom: `1px solid #F3F4F6` }}
-                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#F8FAFF'}
-                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
+                    <tr key={`${trip.ID}_${i}`}
+                      style={{ borderBottom: `1px solid #F3F4F6`, cursor: 'pointer', transition: 'all 0.12s' }}
+                      onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = '#F8FAFF'; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                      onClick={() => {
+                        // Open modal in edit mode
+                        const ngayISO = trip.Ngay ? (() => {
+                          const d = trip.Ngay.includes('/') ? trip.Ngay.split('/') : null;
+                          return d ? `${d[2]}-${d[1]}-${d[0]}` : trip.Ngay;
+                        })() : getTodayISO();
+                        setEditTrip({
+                          ID: trip.ID,
+                          ID_PXK: bk.ID_CODE,
+                          Ngay: ngayISO,
+                          Dia_Chi_Nhan: trip.Dia_Chi_Nhan || '',
+                          Dia_Chi_Giao: trip.Dia_Chi_Giao || '',
+                          Bien_So: trip.Bien_So || '',
+                          Tai_Xe: trip.Tai_Xe || '',
+                          SDT_Tai_Xe: '',
+                          NCC: trip.NCC_Raw || trip.NCC || '',
+                          Loai_Xe_YC: trip.Loai_Xe || '',
+                          Don_Gia_NCC: trip.Don_Gia_NCC || 0,
+                          Phi_Khac_NCC: trip.Phi_Khac_NCC || 0,
+                          Cuoc_Thu_KH: trip.Cuoc_Thu_KH || 0,
+                          Cuoc_Khac_Thu_KH: trip.Cuoc_Khac_Thu_KH || 0,
+                          Trong_Luong: trip.Trong_Luong || '',
+                          So_Bill: trip.So_Bill || '',
+                          Note: trip.Note || '',
+                          Trang_Thai: trip.Trang_Thai || 'Chờ cập nhật',
+                          Thoi_Gian_BK: '',
+                        });
+                        setShowModal(true);
+                      }}
                     >
                       <td style={{ padding: '9px 10px', fontSize: 11, color: C.muted, fontWeight: 700 }}>{i + 1}</td>
-                      <td style={{ padding: '9px 10px', fontFamily: 'monospace', fontSize: 11, color: C.secondary }}>{trip.ID}</td>
+                      <td style={{ padding: '9px 10px' }}>
+                        <span className="trip-id-cell" style={{
+                          fontFamily: 'monospace', fontSize: 11.5, fontWeight: 600,
+                          color: C.secondary, cursor: 'pointer', transition: 'color 0.12s',
+                        }}>{trip.ID}</span>
+                      </td>
                       <td style={{ padding: '9px 10px' }}>
                         <span style={{ fontFamily: 'monospace', fontSize: 11.5, fontWeight: 700, color: C.text, background: '#F1F5F9', padding: '2px 6px', borderRadius: 4 }}>{trip.Bien_So || '—'}</span>
                       </td>
@@ -1170,19 +1242,45 @@ export default function BookingDetailPage() {
         )}
       </div>
 
-      {/* Add Trip Modal — now receives diemNhan from parent booking */}
+      {/* Add/Edit Trip Modal */}
       {showModal && (
         <AddTripModal
           bangkeId={bk.ID_CODE}
           ngay={bk.Ngay}
           diemNhan={parentDiemNhan}
           duAn={bk.Du_An || bk.Doi_Tac || ''}
-          onClose={() => setShowModal(false)}
-          onSaved={() => { setShowModal(false); fetchBooking(); }}
+          editTrip={editTrip}
+          onClose={() => { setShowModal(false); setEditTrip(null); }}
+          onSaved={(msg) => {
+            setShowModal(false);
+            setEditTrip(null);
+            setToast(msg);
+            setTimeout(() => setToast(''), 3500);
+            fetchBooking();
+          }}
         />
       )}
 
-      <style>{`@keyframes spin { to { transform:rotate(360deg); } }`}</style>
+      {/* Toast notification */}
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24, zIndex: 2000,
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '12px 20px', borderRadius: 10,
+          background: '#1E3A5F', color: '#fff', fontSize: 13, fontWeight: 600,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.2)',
+          animation: 'toastIn 0.3s ease',
+        }}>
+          <CheckCircle2 size={16} color="#4ADE80" />
+          {toast}
+        </div>
+      )}
+
+      <style>{`
+        @keyframes spin { to { transform:rotate(360deg); } }
+        @keyframes toastIn { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
+        tr:hover .trip-id-cell { color: #1E3A5F !important; font-weight: 700 !important; }
+      `}</style>
     </div>
   );
 }
