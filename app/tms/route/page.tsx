@@ -3,14 +3,16 @@
 import { useState, useMemo } from 'react';
 import { useERPAuth } from '@/lib/auth';
 import { checkRouteRestrictions, VEHICLE_WEIGHTS } from '@/lib/truck-restrictions';
+import { optimizeRoutes, formatDuration } from '@/lib/route-optimizer';
 import type { RestrictionWarning } from '@/lib/truck-restrictions';
+import type { OptimizedRoute, LatLng } from '@/lib/route-optimizer';
 import dynamic from 'next/dynamic';
 import {
-  MapPin, Navigation, Plus, Trash2, Play, RefreshCw,
+  MapPin, Navigation, Plus, Trash2, RefreshCw,
   ExternalLink, Crosshair, Truck, Map, Route,
-  AlertTriangle, Clock, Shield, ShieldAlert, ToggleLeft, ToggleRight,
+  AlertTriangle, Clock, Shield, ShieldAlert,
   CheckCircle2, AlertCircle, ArrowRight, Info, Layers, ChevronDown,
-  X, Settings2, Zap,
+  Settings2, Zap, Timer,
 } from 'lucide-react';
 
 // ─── Design tokens ───
@@ -21,7 +23,6 @@ const C = {
   text: '#1A1A2E', muted: '#9CA3AF', secondary: '#6B7280',
 };
 
-// ─── Vehicle types ───
 const VEHICLE_TYPES = [
   'VH5 - 6m2', 'VH8 - 12m2', 'VH10 - 18m2', 'VH15 - 24m2',
   'VH20 - 30m2', 'Xe tải 1.5T', 'Xe tải 2T', 'Xe tải 5T',
@@ -33,16 +34,8 @@ const ROUTE_COLORS = [
   '#0EA5E9', '#EC4899', '#059669', '#DC2626', '#6366F1',
 ];
 
-// ─── Types ───
-interface LatLng { lat: number; lng: number; label: string; raw: string; }
-interface RouteResult {
-  vehicleIndex: number;
-  vehicleType: string;
-  stops: LatLng[];
-  totalKm: number;
-  googleMapsUrl: string;
-  warnings: RestrictionWarning[];
-}
+// ─── Extended route with warnings ───
+type RouteWithWarnings = OptimizedRoute & { warnings: RestrictionWarning[] };
 
 // ─── Input parsing ───
 function parseInput(raw: string): { lat: number; lng: number } | null {
@@ -63,103 +56,29 @@ function parseInput(raw: string): { lat: number; lng: number } | null {
   return null;
 }
 
-// ─── Haversine ───
-function haversine(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
-  const R = 6371;
-  const dLat = (b.lat - a.lat) * Math.PI / 180;
-  const dLng = (b.lng - a.lng) * Math.PI / 180;
-  const x = Math.sin(dLat / 2) ** 2
-    + Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-}
-
-// ─── Route optimization ───
-function calculateOptimalRoute(
-  origin: LatLng,
-  destinations: LatLng[],
-  maxStops: number,
-  vehicleType: string,
-  departureTime: string,
-  checkRestrictions: boolean,
-): RouteResult[] {
-  if (!destinations.length) return [];
-  const results: RouteResult[] = [];
-  const remaining = [...destinations];
-  let vehicleIdx = 0;
-
-  while (remaining.length > 0) {
-    const stops: LatLng[] = [];
-    let current: { lat: number; lng: number } = origin;
-
-    while (stops.length < maxStops && remaining.length > 0) {
-      let nearestIdx = 0;
-      let nearestDist = Infinity;
-      for (let i = 0; i < remaining.length; i++) {
-        const d = haversine(current, remaining[i]);
-        if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
-      }
-      stops.push(remaining.splice(nearestIdx, 1)[0]);
-      current = stops[stops.length - 1];
-    }
-
-    let totalKm = 0;
-    let prev: { lat: number; lng: number } = origin;
-    for (const stop of stops) {
-      totalKm += haversine(prev, stop);
-      prev = stop;
-    }
-
-    const allPoints = [origin, ...stops];
-    const gmUrl = 'https://www.google.com/maps/dir/'
-      + allPoints.map(p => `${p.lat},${p.lng}`).join('/');
-
-    // Check restrictions
-    const warnings = checkRestrictions
-      ? checkRouteRestrictions(origin, stops, vehicleType, departureTime)
-      : [];
-
-    results.push({
-      vehicleIndex: vehicleIdx,
-      vehicleType,
-      stops,
-      totalKm: Math.round(totalKm * 10) / 10,
-      googleMapsUrl: gmUrl,
-      warnings,
-    });
-    vehicleIdx++;
-  }
-  return results;
-}
-
-// ─── Get current VN time as HH:mm ───
+// ─── Get VN time ───
 function getNowVN(): string {
   const d = new Date(Date.now() + 7 * 60 * 60 * 1000);
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 }
 
-// ─── Toggle Switch component ───
+// ─── Toggle Switch ───
 function ToggleSwitch({ on, onToggle, label, icon }: {
   on: boolean; onToggle: () => void; label: string; icon: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onToggle}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0',
-        background: 'transparent', border: 'none', cursor: 'pointer', width: '100%',
-      }}
-    >
+    <button onClick={onToggle} style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0',
+      background: 'transparent', border: 'none', cursor: 'pointer', width: '100%',
+    }}>
       <div style={{
         width: 38, height: 20, borderRadius: 10, position: 'relative',
-        background: on ? '#16A34A' : '#D1D5DB', transition: 'background 0.2s',
-        flexShrink: 0,
+        background: on ? '#16A34A' : '#D1D5DB', transition: 'background 0.2s', flexShrink: 0,
       }}>
         <div style={{
           width: 16, height: 16, borderRadius: '50%', background: '#fff',
-          position: 'absolute', top: 2,
-          left: on ? 20 : 2,
-          transition: 'left 0.2s',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+          position: 'absolute', top: 2, left: on ? 20 : 2,
+          transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
         }} />
       </div>
       <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: C.text, fontWeight: 500 }}>
@@ -169,21 +88,18 @@ function ToggleSwitch({ on, onToggle, label, icon }: {
   );
 }
 
-// ─── Leaflet Map (dynamic, no SSR) ───
+// ─── Leaflet (dynamic) ───
 const LeafletMap = dynamic(() => import('./LeafletMap'), {
   ssr: false,
   loading: () => (
-    <div style={{
-      width: '100%', height: '100%', display: 'flex', alignItems: 'center',
-      justifyContent: 'center', background: '#F8FAFC', borderRadius: 12,
-    }}>
+    <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#F8FAFC' }}>
       <RefreshCw size={20} color={C.muted} style={{ animation: 'spin 1s linear infinite' }} />
     </div>
   ),
 });
 
 // ═══════════════════════════════════════
-// MAIN PAGE COMPONENT
+// MAIN PAGE
 // ═══════════════════════════════════════
 export default function RouteOptimizationPage() {
   const { isAuthenticated } = useERPAuth();
@@ -197,17 +113,18 @@ export default function RouteOptimizationPage() {
   const [maxStops, setMaxStops] = useState(5);
   const [locating, setLocating] = useState(false);
 
-  // Advanced options
+  // Advanced
   const [departureTime, setDepartureTime] = useState(getNowVN());
   const [showTraffic, setShowTraffic] = useState(false);
   const [showRestrictions, setShowRestrictions] = useState(true);
   const [advancedOpen, setAdvancedOpen] = useState(true);
 
   // Results
-  const [routes, setRoutes] = useState<RouteResult[]>([]);
+  const [routes, setRoutes] = useState<RouteWithWarnings[]>([]);
   const [optimizing, setOptimizing] = useState(false);
   const [toast, setToast] = useState('');
   const [error, setError] = useState('');
+  const [usedOSRM, setUsedOSRM] = useState(false);
 
   // Parsed
   const originParsed = useMemo(() => {
@@ -228,10 +145,10 @@ export default function RouteOptimizationPage() {
   // Stats
   const totalDests = destParsed.length;
   const totalKm = routes.reduce((s, r) => s + r.totalKm, 0);
+  const totalDuration = routes.reduce((s, r) => s + r.durationSec, 0);
   const totalWarnings = routes.reduce((s, r) => s + r.warnings.length, 0);
   const vehicleWeightKg = VEHICLE_WEIGHTS[vehicleType] || 1500;
 
-  // Geolocation
   const getMyLocation = () => {
     if (!navigator.geolocation) { setError('Trình duyệt không hỗ trợ Geolocation'); return; }
     setLocating(true);
@@ -239,43 +156,59 @@ export default function RouteOptimizationPage() {
       pos => {
         setOriginRaw(`${pos.coords.latitude}, ${pos.coords.longitude}`);
         setLocating(false);
-        showToast('📍 Đã lấy vị trí hiện tại');
+        showToastMsg('📍 Đã lấy vị trí hiện tại');
       },
       err => { setError('Không lấy được vị trí: ' + err.message); setLocating(false); },
       { enableHighAccuracy: true, timeout: 10000 }
     );
   };
 
-  // Optimize
-  const handleOptimize = () => {
+  // ── Optimize with OSRM ──
+  const handleOptimize = async () => {
     setError('');
     if (!originParsed) { setError('Vui lòng nhập Điểm Xuất Phát (tọa độ hoặc link Google Maps)'); return; }
     if (destParsed.length === 0) { setError('Vui lòng nhập ít nhất 1 Điểm Đến có tọa độ hợp lệ'); return; }
 
     setOptimizing(true);
-    setTimeout(() => {
-      const result = calculateOptimalRoute(
-        originParsed, [...destParsed], maxStops, vehicleType,
-        departureTime, showRestrictions,
-      );
-      setRoutes(result);
-      setOptimizing(false);
 
-      const warnCount = result.reduce((s, r) => s + r.warnings.length, 0);
+    try {
+      const optimized = await optimizeRoutes(originParsed, [...destParsed], maxStops, vehicleType);
+
+      // Check if OSRM geometry was returned
+      const hasGeometry = optimized.some(r => r.geometry.length > 0);
+      setUsedOSRM(hasGeometry);
+
+      // Add restriction warnings
+      const withWarnings: RouteWithWarnings[] = optimized.map(r => ({
+        ...r,
+        warnings: showRestrictions
+          ? checkRouteRestrictions(originParsed, r.stops, vehicleType, departureTime)
+          : [],
+      }));
+
+      setRoutes(withWarnings);
+
+      const warnCount = withWarnings.reduce((s, r) => s + r.warnings.length, 0);
       if (warnCount > 0) {
-        showToast(`⚠️ Phát hiện ${warnCount} cảnh báo cấm tải! Vui lòng kiểm tra.`);
+        showToastMsg(`⚠️ Phát hiện ${warnCount} cảnh báo cấm tải! Vui lòng kiểm tra.`);
       } else {
-        showToast(`✅ Đã phân ${result.length} tuyến cho ${destParsed.length} điểm giao`);
+        const etaStr = hasGeometry ? ` • ETA: ${formatDuration(optimized.reduce((s, r) => s + r.durationSec, 0))}` : '';
+        showToastMsg(`✅ Tối ưu ${optimized.length} tuyến cho ${destParsed.length} điểm giao${etaStr}`);
       }
-    }, 800);
+    } catch (err) {
+      setError('Lỗi khi tối ưu tuyến đường. Vui lòng thử lại.');
+      console.error(err);
+    } finally {
+      setOptimizing(false);
+    }
   };
 
   const handleReset = () => {
     setOriginRaw(''); setDestText(''); setDestList([]);
-    setRoutes([]); setError('');
+    setRoutes([]); setError(''); setUsedOSRM(false);
   };
 
-  const showToast = (msg: string) => {
+  const showToastMsg = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(''), 4000);
   };
@@ -306,18 +239,20 @@ export default function RouteOptimizationPage() {
               Tối Ưu Tuyến Đường
             </h1>
             <p style={{ fontSize: 11, color: C.muted, margin: 0 }}>
-              Route Optimization Tool — Phân tuyến & Kiểm tra cấm tải
+              Route Optimization — OSRM Real-World Routing + Cấm tải
             </p>
           </div>
         </div>
 
-        {/* Quick stats */}
         {routes.length > 0 && (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {[
               { label: 'Tuyến', value: routes.length, color: C.primary, bg: '#EFF6FF' },
               { label: 'Điểm giao', value: destParsed.length, color: C.orange, bg: '#FFF7ED' },
               { label: 'Tổng km', value: `${Math.round(totalKm)}`, color: C.green, bg: '#F0FDF4' },
+              ...(totalDuration > 0 ? [{
+                label: 'ETA', value: formatDuration(totalDuration), color: '#2563EB', bg: '#EFF6FF',
+              }] : []),
               ...(totalWarnings > 0 ? [{
                 label: 'Cảnh báo', value: `${totalWarnings}`, color: '#DC2626', bg: '#FEF2F2',
               }] : []),
@@ -336,11 +271,9 @@ export default function RouteOptimizationPage() {
 
       {/* ── SPLIT LAYOUT ── */}
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 3fr', gap: 16, alignItems: 'start' }}>
-
         {/* ═══ LEFT: FORM ═══ */}
         <div style={{
-          background: C.card, borderRadius: 16, padding: 0,
-          boxShadow: '0 1px 6px rgba(0,0,0,0.08)',
+          background: C.card, borderRadius: 16, boxShadow: '0 1px 6px rgba(0,0,0,0.08)',
           border: `1px solid ${C.border}`,
         }}>
           <div style={{
@@ -353,70 +286,56 @@ export default function RouteOptimizationPage() {
             <span style={{ fontSize: 13, fontWeight: 700, color: '#fff' }}>Cấu Hình Tuyến Đường</span>
           </div>
 
-          <div style={{ padding: '20px 20px' }}>
-            {/* ── ĐIỂM XUẤT PHÁT ── */}
+          <div style={{ padding: 20 }}>
+            {/* ORIGIN */}
             <div style={{ marginBottom: 20 }}>
               <label style={{
                 display: 'flex', alignItems: 'center', gap: 5,
                 fontSize: 11, fontWeight: 700, color: C.primary,
                 textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8,
               }}>
-                <div style={{
-                  width: 18, height: 18, borderRadius: '50%', background: C.red,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}>
+                <div style={{ width: 18, height: 18, borderRadius: '50%', background: C.red, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                   <MapPin size={10} color="#fff" />
                 </div>
                 Điểm Xuất Phát *
               </label>
               <div style={{ display: 'flex', gap: 6 }}>
-                <input
-                  value={originRaw}
-                  onChange={e => setOriginRaw(e.target.value)}
-                  placeholder="Tọa độ, link Google Maps, hoặc địa chỉ..."
+                <input value={originRaw} onChange={e => setOriginRaw(e.target.value)}
+                  placeholder="Tọa độ, link Google Maps..."
                   style={{
                     flex: 1, height: 40, padding: '0 12px', fontSize: 13,
                     border: `1.5px solid ${originParsed ? '#16A34A' : C.border}`,
                     borderRadius: 10, outline: 'none', boxSizing: 'border-box',
                     color: C.text, background: originParsed ? '#F0FDF4' : C.card,
-                    transition: 'all 0.15s',
                   }}
                 />
-                <button onClick={getMyLocation} disabled={locating} title="Lấy vị trí hiện tại" style={{
-                  width: 40, height: 40, borderRadius: 10,
-                  border: `1px solid ${C.border}`, background: C.card,
-                  cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                <button onClick={getMyLocation} disabled={locating} title="Vị trí hiện tại" style={{
+                  width: 40, height: 40, borderRadius: 10, border: `1px solid ${C.border}`,
+                  background: C.card, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}>
-                  {locating
-                    ? <RefreshCw size={14} color={C.primary} style={{ animation: 'spin 1s linear infinite' }} />
-                    : <Crosshair size={14} color={C.primary} />
-                  }
+                  {locating ? <RefreshCw size={14} color={C.primary} style={{ animation: 'spin 1s linear infinite' }} /> : <Crosshair size={14} color={C.primary} />}
                 </button>
               </div>
               {originParsed && (
                 <div style={{ fontSize: 10, color: '#16A34A', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <CheckCircle2 size={10} /> Tọa độ: {originParsed.lat.toFixed(5)}, {originParsed.lng.toFixed(5)}
+                  <CheckCircle2 size={10} /> {originParsed.lat.toFixed(5)}, {originParsed.lng.toFixed(5)}
                 </div>
               )}
             </div>
 
-            {/* ── DANH SÁCH ĐIỂM ĐẾN ── */}
+            {/* DESTINATIONS */}
             <div style={{ marginBottom: 20 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                 <label style={{
                   display: 'flex', alignItems: 'center', gap: 5,
-                  fontSize: 11, fontWeight: 700, color: C.primary,
-                  textTransform: 'uppercase', letterSpacing: '0.06em',
+                  fontSize: 11, fontWeight: 700, color: C.primary, textTransform: 'uppercase', letterSpacing: '0.06em',
                 }}>
-                  <div style={{
-                    width: 18, height: 18, borderRadius: '50%', background: '#F59E0B',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
+                  <div style={{ width: 18, height: 18, borderRadius: '50%', background: '#F59E0B', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     <MapPin size={10} color="#fff" />
                   </div>
                   Điểm Đến ({totalDests} hợp lệ) *
                 </label>
-                <div style={{ display: 'flex', gap: 0, borderRadius: 6, overflow: 'hidden', border: `1px solid ${C.border}` }}>
+                <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: `1px solid ${C.border}` }}>
                   {(['textarea', 'list'] as const).map(m => (
                     <button key={m} onClick={() => setInputMode(m)} style={{
                       padding: '3px 10px', fontSize: 10, fontWeight: 600, border: 'none', cursor: 'pointer',
@@ -431,9 +350,7 @@ export default function RouteOptimizationPage() {
 
               {inputMode === 'textarea' ? (
                 <div>
-                  <textarea
-                    value={destText}
-                    onChange={e => setDestText(e.target.value)}
+                  <textarea value={destText} onChange={e => setDestText(e.target.value)}
                     placeholder={"Mỗi dòng = 1 điểm giao\n\nVí dụ:\n10.7626, 106.6601\n10.8231, 106.6297"}
                     style={{
                       width: '100%', minHeight: 130, padding: '10px 12px',
@@ -444,7 +361,7 @@ export default function RouteOptimizationPage() {
                     }}
                   />
                   <div style={{ fontSize: 10, color: C.muted, marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <Info size={10} /> Hỗ trợ: Tọa độ • Link Google Maps • Copy từ Excel
+                    <Info size={10} /> Tọa độ • Link Google Maps • Copy từ Excel
                   </div>
                 </div>
               ) : (
@@ -486,12 +403,11 @@ export default function RouteOptimizationPage() {
               )}
             </div>
 
-            {/* ── CẤU HÌNH VẬN TẢI ── */}
+            {/* VEHICLE CONFIG */}
             <div style={{ marginBottom: 16 }}>
               <label style={{
                 display: 'flex', alignItems: 'center', gap: 5,
-                fontSize: 11, fontWeight: 700, color: C.primary,
-                textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8,
+                fontSize: 11, fontWeight: 700, color: C.primary, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8,
               }}>
                 <Truck size={14} color={C.primary} /> Cấu Hình Vận Tải
               </label>
@@ -506,7 +422,7 @@ export default function RouteOptimizationPage() {
                     {VEHICLE_TYPES.map(v => <option key={v} value={v}>{v}</option>)}
                   </select>
                   <div style={{ fontSize: 9, color: C.muted, marginTop: 3 }}>
-                    Tải trọng: <b style={{ color: C.text }}>{(vehicleWeightKg / 1000).toFixed(1)}T</b> ({vehicleWeightKg.toLocaleString()} kg)
+                    Tải trọng: <b style={{ color: C.text }}>{(vehicleWeightKg / 1000).toFixed(1)}T</b>
                   </div>
                 </div>
                 <div>
@@ -524,36 +440,26 @@ export default function RouteOptimizationPage() {
               </div>
             </div>
 
-            {/* ── TÙY CHỌN NÂNG CAO ── */}
-            <div style={{
-              marginBottom: 16, border: `1px solid ${C.border}`, borderRadius: 10,
-              overflow: 'hidden',
-            }}>
-              <button
-                onClick={() => setAdvancedOpen(o => !o)}
-                style={{
-                  width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '10px 14px', background: '#F8FAFC', border: 'none', cursor: 'pointer',
-                }}
-              >
+            {/* ADVANCED OPTIONS */}
+            <div style={{ marginBottom: 16, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
+              <button onClick={() => setAdvancedOpen(o => !o)} style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 14px', background: '#F8FAFC', border: 'none', cursor: 'pointer',
+              }}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 700, color: C.primary, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                   <Settings2 size={13} color={C.primary} /> Tùy Chọn Nâng Cao
                 </span>
                 <ChevronDown size={14} color={C.muted} style={{
-                  transform: advancedOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-                  transition: 'transform 0.2s',
+                  transform: advancedOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s',
                 }} />
               </button>
-
               {advancedOpen && (
                 <div style={{ padding: '12px 14px', borderTop: `1px solid ${C.border}` }}>
-                  {/* Departure time */}
                   <div style={{ marginBottom: 10 }}>
                     <div style={{ fontSize: 10, color: C.secondary, fontWeight: 600, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
                       <Clock size={10} /> Thời gian khởi hành (dự kiến)
                     </div>
-                    <input type="time" value={departureTime}
-                      onChange={e => setDepartureTime(e.target.value)}
+                    <input type="time" value={departureTime} onChange={e => setDepartureTime(e.target.value)}
                       style={{
                         width: '100%', height: 36, padding: '0 10px', fontSize: 13, fontWeight: 600,
                         border: `1px solid ${C.border}`, borderRadius: 8,
@@ -561,20 +467,14 @@ export default function RouteOptimizationPage() {
                       }}
                     />
                     <div style={{ fontSize: 9, color: C.muted, marginTop: 3 }}>
-                      Dùng để kiểm tra vi phạm giờ cấm tải (06:00-09:00, 16:00-20:00)
+                      Kiểm tra cấm tải giờ cao điểm (06-09h, 16-20h)
                     </div>
                   </div>
-
-                  {/* Toggles */}
-                  <ToggleSwitch
-                    on={showTraffic}
-                    onToggle={() => setShowTraffic(t => !t)}
+                  <ToggleSwitch on={showTraffic} onToggle={() => setShowTraffic(t => !t)}
                     label="Hiển thị giao thông (Traffic Layer)"
                     icon={<Layers size={12} color={showTraffic ? '#16A34A' : C.muted} />}
                   />
-                  <ToggleSwitch
-                    on={showRestrictions}
-                    onToggle={() => setShowRestrictions(t => !t)}
+                  <ToggleSwitch on={showRestrictions} onToggle={() => setShowRestrictions(t => !t)}
                     label="Cảnh báo đường cấm tải / cấm giờ"
                     icon={<ShieldAlert size={12} color={showRestrictions ? '#DC2626' : C.muted} />}
                   />
@@ -582,18 +482,17 @@ export default function RouteOptimizationPage() {
               )}
             </div>
 
-            {/* ── ERROR ── */}
+            {/* ERROR */}
             {error && (
               <div style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                fontSize: 12, color: '#DC2626', background: '#FEF2F2',
-                padding: '8px 12px', borderRadius: 8, marginBottom: 14,
+                display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#DC2626',
+                background: '#FEF2F2', padding: '8px 12px', borderRadius: 8, marginBottom: 14,
               }}>
                 <AlertCircle size={14} /> {error}
               </div>
             )}
 
-            {/* ── ACTION BUTTONS ── */}
+            {/* ACTION */}
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={handleOptimize} disabled={optimizing} style={{
                 flex: 1, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
@@ -604,30 +503,37 @@ export default function RouteOptimizationPage() {
                 boxShadow: optimizing ? 'none' : '0 2px 10px rgba(255,197,0,0.35)',
                 transition: 'all 0.15s',
               }}>
-                {optimizing
-                  ? <RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                  : <Zap size={16} />
-                }
-                {optimizing ? 'Đang tối ưu...' : 'Bắt Đầu Tối Ưu'}
+                {optimizing ? <RefreshCw size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Zap size={16} />}
+                {optimizing ? 'Đang tối ưu OSRM...' : 'Bắt Đầu Tối Ưu'}
               </button>
               <button onClick={handleReset} title="Reset" style={{
-                width: 44, height: 44, borderRadius: 10,
-                border: `1px solid ${C.border}`, background: C.card,
-                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: 44, height: 44, borderRadius: 10, border: `1px solid ${C.border}`,
+                background: C.card, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>
                 <RefreshCw size={14} color={C.secondary} />
               </button>
             </div>
+
+            {/* OSRM badge */}
+            {usedOSRM && routes.length > 0 && (
+              <div style={{
+                marginTop: 10, display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 10, color: '#16A34A', padding: '6px 10px',
+                background: '#F0FDF4', borderRadius: 6, border: '1px solid #BBF7D0',
+              }}>
+                <CheckCircle2 size={11} />
+                <span><b>OSRM API</b> — Đường đi thực tế, tự động sắp xếp thứ tự TSP</span>
+              </div>
+            )}
           </div>
         </div>
 
         {/* ═══ RIGHT: MAP + RESULTS ═══ */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* ── MAP ── */}
+          {/* MAP */}
           <div style={{
             background: C.card, borderRadius: 16, overflow: 'hidden',
-            boxShadow: '0 1px 6px rgba(0,0,0,0.08)',
-            border: `1px solid ${C.border}`,
+            boxShadow: '0 1px 6px rgba(0,0,0,0.08)', border: `1px solid ${C.border}`,
           }}>
             <div style={{
               padding: '10px 16px', borderBottom: `1px solid ${C.border}`,
@@ -636,11 +542,16 @@ export default function RouteOptimizationPage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Map size={14} color={C.primary} />
                 <span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>Bản đồ tuyến đường</span>
+                {usedOSRM && (
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, color: '#16A34A', padding: '2px 6px',
+                    background: '#F0FDF4', borderRadius: 4, border: '1px solid #BBF7D0',
+                  }}>🛣️ Real Road</span>
+                )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10, color: C.muted }}>
-                {showTraffic && <span style={{ color: '#F59E0B', fontWeight: 600 }}>🚦 Traffic ON</span>}
-                {showRestrictions && <span style={{ color: '#DC2626', fontWeight: 600 }}>⛔ Cấm tải ON</span>}
-                <span>© OSM</span>
+                {showTraffic && <span style={{ color: '#F59E0B', fontWeight: 600 }}>🚦 Traffic</span>}
+                {showRestrictions && <span style={{ color: '#DC2626', fontWeight: 600 }}>⛔ Cấm tải</span>}
                 {originParsed && <span style={{ color: '#16A34A' }}>• Xuất phát ✓</span>}
                 {totalDests > 0 && <span style={{ color: '#F59E0B' }}>• {totalDests} điểm</span>}
               </div>
@@ -656,7 +567,7 @@ export default function RouteOptimizationPage() {
             </div>
           </div>
 
-          {/* ── RESTRICTION WARNINGS BANNER ── */}
+          {/* RESTRICTION WARNINGS */}
           {totalWarnings > 0 && (
             <div style={{
               background: 'linear-gradient(135deg, #FEF2F2, #FECACA)',
@@ -664,16 +575,11 @@ export default function RouteOptimizationPage() {
               animation: 'pulseWarn 2s ease-in-out 3',
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <div style={{
-                  width: 28, height: 28, borderRadius: 8, background: '#DC2626',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}>
+                <div style={{ width: 28, height: 28, borderRadius: 8, background: '#DC2626', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                   <AlertTriangle size={16} color="#fff" />
                 </div>
                 <div>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: '#991B1B' }}>
-                    ⚠️ Phát hiện {totalWarnings} vi phạm cấm tải!
-                  </span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#991B1B' }}>⚠️ {totalWarnings} vi phạm cấm tải!</span>
                   <span style={{ fontSize: 11, color: '#DC2626', marginLeft: 8 }}>
                     Khởi hành: {departureTime} • Tải: {(vehicleWeightKg / 1000).toFixed(1)}T
                   </span>
@@ -683,8 +589,7 @@ export default function RouteOptimizationPage() {
                 {routes.flatMap(r => r.warnings).map((w, i) => (
                   <div key={i} style={{
                     fontSize: 11, color: '#7F1D1D', display: 'flex', alignItems: 'center', gap: 6,
-                    padding: '4px 10px', background: '#fff', borderRadius: 6,
-                    border: '1px solid #FECACA',
+                    padding: '4px 10px', background: '#fff', borderRadius: 6, border: '1px solid #FECACA',
                   }}>
                     <ShieldAlert size={12} color="#DC2626" />
                     <b>{w.streetName}</b> — {w.description}
@@ -697,12 +602,11 @@ export default function RouteOptimizationPage() {
             </div>
           )}
 
-          {/* ── RESULTS TABLE ── */}
+          {/* RESULTS */}
           {routes.length > 0 && (
             <div style={{
               background: C.card, borderRadius: 16, overflow: 'hidden',
-              boxShadow: '0 1px 6px rgba(0,0,0,0.08)',
-              border: `1px solid ${C.border}`,
+              boxShadow: '0 1px 6px rgba(0,0,0,0.08)', border: `1px solid ${C.border}`,
               animation: 'fadeInUp 0.3s ease',
             }}>
               <div style={{
@@ -716,6 +620,7 @@ export default function RouteOptimizationPage() {
                   <Truck size={14} color={totalWarnings > 0 ? '#991B1B' : '#92400E'} />
                   <span style={{ fontSize: 12, fontWeight: 700, color: totalWarnings > 0 ? '#991B1B' : '#92400E' }}>
                     Kết Quả — {routes.length} xe • {totalDests} điểm • {Math.round(totalKm)} km
+                    {totalDuration > 0 && ` • ${formatDuration(totalDuration)}`}
                     {totalWarnings > 0 && ` • ${totalWarnings} ⚠️`}
                   </span>
                 </div>
@@ -725,40 +630,47 @@ export default function RouteOptimizationPage() {
                 {routes.map((r, i) => {
                   const routeColor = ROUTE_COLORS[i % ROUTE_COLORS.length];
                   const hasWarnings = r.warnings.length > 0;
+                  const hasRealRoute = r.geometry.length > 0;
                   return (
                     <div key={i} style={{
                       border: `1.5px solid ${hasWarnings ? '#FECACA' : `${routeColor}20`}`,
                       borderRadius: 12, padding: 14,
                       background: hasWarnings ? '#FEF2F2' : `${routeColor}08`,
                       animation: 'fadeInUp 0.3s ease',
-                      animationDelay: `${i * 80}ms`,
-                      animationFillMode: 'both',
+                      animationDelay: `${i * 80}ms`, animationFillMode: 'both',
                     }}>
                       {/* Header */}
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                           <div style={{
-                            width: 28, height: 28, borderRadius: 8,
-                            background: routeColor, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            width: 28, height: 28, borderRadius: 8, background: routeColor,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
                           }}>
                             <Truck size={14} color="#fff" />
                           </div>
-                          <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
                               Xe {i + 1} ({r.vehicleType})
                             </span>
                             <span style={{
                               fontSize: 10, fontWeight: 700, color: routeColor,
-                              marginLeft: 8, background: `${routeColor}15`,
-                              padding: '2px 8px', borderRadius: 4,
+                              background: `${routeColor}15`, padding: '2px 8px', borderRadius: 4,
                             }}>
                               {r.stops.length} điểm • {r.totalKm} km
                             </span>
+                            {r.durationSec > 0 && (
+                              <span style={{
+                                fontSize: 10, fontWeight: 700, color: '#2563EB',
+                                background: '#EFF6FF', padding: '2px 8px', borderRadius: 4,
+                                display: 'flex', alignItems: 'center', gap: 3,
+                              }}>
+                                <Timer size={9} /> {formatDuration(r.durationSec)}
+                              </span>
+                            )}
                             {hasWarnings && (
                               <span style={{
                                 fontSize: 10, fontWeight: 700, color: '#DC2626',
-                                marginLeft: 6, background: '#FEE2E2',
-                                padding: '2px 8px', borderRadius: 4,
+                                background: '#FEE2E2', padding: '2px 8px', borderRadius: 4,
                                 animation: 'pulseWarn 2s ease-in-out 3',
                               }}>
                                 ⚠️ {r.warnings.length} cảnh báo
@@ -768,10 +680,8 @@ export default function RouteOptimizationPage() {
                         </div>
                         <div style={{ display: 'flex', gap: 6 }}>
                           {hasWarnings && (
-                            <a
-                              href={r.googleMapsUrl.replace('/maps/dir/', '/maps/dir/?avoid=tolls&')}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                            <a href={r.googleMapsUrl + '&avoid=tolls'}
+                              target="_blank" rel="noopener noreferrer"
                               style={{
                                 display: 'flex', alignItems: 'center', gap: 4,
                                 padding: '5px 10px', borderRadius: 7,
@@ -779,7 +689,7 @@ export default function RouteOptimizationPage() {
                                 fontSize: 10, fontWeight: 600, textDecoration: 'none',
                                 border: '1px solid #FDE68A',
                               }}
-                              title="Mở tuyến thay thế tránh cấm tải"
+                              title="Tuyến thay thế tránh cấm tải"
                             >
                               <Shield size={10} /> Tránh cấm tải
                             </a>
@@ -791,20 +701,16 @@ export default function RouteOptimizationPage() {
                             fontSize: 11, fontWeight: 600, textDecoration: 'none',
                             boxShadow: '0 1px 4px rgba(30,58,95,0.25)',
                           }}>
-                            <ExternalLink size={11} /> Mở Google Maps
+                            <ExternalLink size={11} /> Google Maps
                           </a>
                         </div>
                       </div>
 
                       {/* Route chain */}
-                      <div style={{
-                        display: 'flex', alignItems: 'center', gap: 4,
-                        flexWrap: 'wrap', fontSize: 11.5, color: C.secondary,
-                      }}>
-                        <span style={{
-                          padding: '2px 8px', borderRadius: 4,
-                          background: '#DC262615', color: '#DC2626', fontWeight: 700, fontSize: 10,
-                        }}>Xuất phát</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', fontSize: 11.5, color: C.secondary }}>
+                        <span style={{ padding: '2px 8px', borderRadius: 4, background: '#DC262615', color: '#DC2626', fontWeight: 700, fontSize: 10 }}>
+                          Xuất phát
+                        </span>
                         {r.stops.map((stop, si) => (
                           <span key={si} style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                             <ArrowRight size={10} color={C.muted} />
@@ -819,12 +725,9 @@ export default function RouteOptimizationPage() {
                         ))}
                       </div>
 
-                      {/* Warnings per route */}
+                      {/* Warnings */}
                       {hasWarnings && (
-                        <div style={{
-                          marginTop: 8, padding: '8px 10px', borderRadius: 8,
-                          background: '#FFF', border: '1px solid #FECACA',
-                        }}>
+                        <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#fff', border: '1px solid #FECACA' }}>
                           {r.warnings.map((w, wi) => (
                             <div key={wi} style={{
                               display: 'flex', alignItems: 'flex-start', gap: 6, fontSize: 11,
@@ -835,9 +738,8 @@ export default function RouteOptimizationPage() {
                               <div>
                                 <b>{w.streetName}</b>: {w.description}
                                 <span style={{
-                                  display: 'inline-block', marginLeft: 6,
-                                  fontSize: 9, fontFamily: 'monospace', color: '#DC2626',
-                                  background: '#FEE2E2', padding: '1px 6px', borderRadius: 3,
+                                  display: 'inline-block', marginLeft: 6, fontSize: 9, fontFamily: 'monospace',
+                                  color: '#DC2626', background: '#FEE2E2', padding: '1px 6px', borderRadius: 3,
                                 }}>
                                   Cấm {w.restrictedTimes.join(', ')} • {'>'}{(w.maxWeight / 1000).toFixed(1)}T
                                 </span>
@@ -855,7 +757,7 @@ export default function RouteOptimizationPage() {
         </div>
       </div>
 
-      {/* ── TOAST ── */}
+      {/* TOAST */}
       {toast && (
         <div style={{
           position: 'fixed', bottom: 24, right: 24, zIndex: 2000,

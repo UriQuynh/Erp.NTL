@@ -5,27 +5,18 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { HCM_TRUCK_RESTRICTIONS } from '@/lib/truck-restrictions';
 import type { RestrictionWarning } from '@/lib/truck-restrictions';
+import type { OptimizedRoute, LatLng } from '@/lib/route-optimizer';
 
-// ─── Route colors (must match parent) ───
+// ─── Route colors ───
 const ROUTE_COLORS = [
   '#E74C3C', '#2563EB', '#16A34A', '#D97706', '#7C3AED',
   '#0EA5E9', '#EC4899', '#059669', '#DC2626', '#6366F1',
 ];
 
-interface LatLng { lat: number; lng: number; label: string; raw: string; }
-interface RouteResult {
-  vehicleIndex: number;
-  vehicleType: string;
-  stops: LatLng[];
-  totalKm: number;
-  googleMapsUrl: string;
-  warnings: RestrictionWarning[];
-}
-
 interface Props {
   origin: { lat: number; lng: number; label: string; raw: string } | null;
   destinations: LatLng[];
-  routes: RouteResult[];
+  routes: (OptimizedRoute & { warnings: RestrictionWarning[] })[];
   showTraffic: boolean;
   showRestrictions: boolean;
 }
@@ -110,21 +101,14 @@ export default function LeafletMap({ origin, destinations, routes, showTraffic, 
 
     if (showTraffic) {
       if (!trafficLayerRef.current) {
-        // Google Traffic tiles (mutex tiles)
         trafficLayerRef.current = L.tileLayer(
           'https://{s}.google.com/vt/lyrs=m@221097413,traffic&x={x}&y={y}&z={z}',
-          {
-            maxZoom: 20,
-            subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
-            opacity: 0.7,
-          }
+          { maxZoom: 20, subdomains: ['mt0', 'mt1', 'mt2', 'mt3'], opacity: 0.7 }
         );
       }
       trafficLayerRef.current.addTo(map);
     } else {
-      if (trafficLayerRef.current) {
-        map.removeLayer(trafficLayerRef.current);
-      }
+      if (trafficLayerRef.current) map.removeLayer(trafficLayerRef.current);
     }
   }, [showTraffic]);
 
@@ -133,23 +117,16 @@ export default function LeafletMap({ origin, destinations, routes, showTraffic, 
     const layer = restrictionLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
-
     if (!showRestrictions) return;
 
     HCM_TRUCK_RESTRICTIONS.forEach(r => {
-      // Draw restricted road as red dashed polyline
       const polyline = L.polyline(r.path, {
-        color: '#DC2626',
-        weight: 5,
-        opacity: 0.55,
-        dashArray: '10 6',
-        lineCap: 'round',
+        color: '#DC2626', weight: 5, opacity: 0.55,
+        dashArray: '10 6', lineCap: 'round',
       });
       polyline.bindPopup(`
         <div style="min-width:200px">
-          <div style="font-size:13px;font-weight:700;color:#DC2626;margin-bottom:4px">
-            ⛔ ${r.streetName}
-          </div>
+          <div style="font-size:13px;font-weight:700;color:#DC2626;margin-bottom:4px">⛔ ${r.streetName}</div>
           <div style="font-size:11px;color:#374151;line-height:1.5">
             ${r.description}<br/>
             <b>Giờ cấm:</b> ${r.restrictedTimes.join(', ')}<br/>
@@ -159,30 +136,13 @@ export default function LeafletMap({ origin, destinations, routes, showTraffic, 
       `);
       layer.addLayer(polyline);
 
-      // Add small warning icon at midpoint of the restriction
       const mid = r.path[Math.floor(r.path.length / 2)];
       const icon = L.divIcon({
-        className: '',
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
-        html: `<div style="
-          width:22px; height:22px; border-radius:5px;
-          background:#DC2626; border:2px solid #fff;
-          box-shadow:0 1px 4px rgba(0,0,0,0.3);
-          display:flex; align-items:center; justify-content:center;
-          font-size:12px; cursor:pointer;
-        ">⛔</div>`,
+        className: '', iconSize: [22, 22], iconAnchor: [11, 11],
+        html: `<div style="width:22px;height:22px;border-radius:5px;background:#DC2626;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer">⛔</div>`,
       });
       const marker = L.marker(mid, { icon });
-      marker.bindPopup(`
-        <div style="min-width:180px">
-          <div style="font-size:12px;font-weight:700;color:#DC2626">⛔ ${r.streetName}</div>
-          <div style="font-size:11px;color:#6B7280;margin-top:2px">
-            Cấm ${r.restrictedTimes.join(', ')}<br/>
-            Tải trọng > ${(r.maxWeight / 1000).toFixed(1)}T
-          </div>
-        </div>
-      `);
+      marker.bindPopup(`<div style="min-width:180px"><div style="font-size:12px;font-weight:700;color:#DC2626">⛔ ${r.streetName}</div><div style="font-size:11px;color:#6B7280;margin-top:2px">Cấm ${r.restrictedTimes.join(', ')}<br/>Tải trọng > ${(r.maxWeight / 1000).toFixed(1)}T</div></div>`);
       layer.addLayer(marker);
     });
   }, [showRestrictions]);
@@ -196,7 +156,6 @@ export default function LeafletMap({ origin, destinations, routes, showTraffic, 
 
     markers.clearLayers();
     polylines.clearLayers();
-
     const bounds = L.latLngBounds([]);
 
     // Origin marker (red)
@@ -211,33 +170,52 @@ export default function LeafletMap({ origin, destinations, routes, showTraffic, 
     if (routes.length > 0 && origin) {
       routes.forEach((route, ri) => {
         const color = ROUTE_COLORS[ri % ROUTE_COLORS.length];
-        const linePoints: [number, number][] = [[origin.lat, origin.lng]];
 
+        // Add numbered stop markers
         route.stops.forEach((stop, si) => {
-          const hasWarning = route.warnings.length > 0;
           const marker = L.marker([stop.lat, stop.lng], {
             icon: createNumberIcon(si + 1, color),
           }).bindPopup(`
             <b style="font-size:12px;color:${color}">Xe ${ri + 1} — ${stop.label}</b>
             <br><span style="font-size:11px">${stop.lat.toFixed(5)}, ${stop.lng.toFixed(5)}</span>
-            ${hasWarning ? '<br><span style="font-size:11px;color:#DC2626">⚠️ Có cảnh báo cấm tải</span>' : ''}
+            ${route.warnings.length > 0 ? '<br><span style="font-size:11px;color:#DC2626">⚠️ Có cảnh báo cấm tải</span>' : ''}
           `);
           markers.addLayer(marker);
           bounds.extend([stop.lat, stop.lng]);
-          linePoints.push([stop.lat, stop.lng]);
         });
 
-        // Draw polyline
-        const polyline = L.polyline(linePoints, {
-          color,
-          weight: 3.5,
-          opacity: 0.8,
-          dashArray: ri > 0 ? '8 4' : undefined,
-        });
-        polylines.addLayer(polyline);
+        // Draw polyline — use OSRM geometry if available, else straight lines
+        if (route.geometry && route.geometry.length > 0) {
+          // OSRM returns [lng, lat], Leaflet needs [lat, lng]
+          const roadPath: [number, number][] = route.geometry.map(
+            ([lng, lat]) => [lat, lng] as [number, number]
+          );
+          const polyline = L.polyline(roadPath, {
+            color,
+            weight: 4,
+            opacity: 0.85,
+            lineCap: 'round',
+            lineJoin: 'round',
+          });
+          polylines.addLayer(polyline);
+
+          // Extend bounds with road geometry
+          roadPath.forEach(p => bounds.extend(p));
+        } else {
+          // Fallback: straight lines
+          const linePoints: [number, number][] = [
+            [origin.lat, origin.lng],
+            ...route.stops.map(s => [s.lat, s.lng] as [number, number]),
+          ];
+          const polyline = L.polyline(linePoints, {
+            color, weight: 3, opacity: 0.7,
+            dashArray: '6 4',
+          });
+          polylines.addLayer(polyline);
+        }
       });
     } else {
-      // No routes, show yellow destination markers
+      // No routes yet, show yellow destination markers
       destinations.forEach((dest, i) => {
         const marker = L.marker([dest.lat, dest.lng], {
           icon: createNumberIcon(i + 1, '#F59E0B'),
@@ -253,9 +231,6 @@ export default function LeafletMap({ origin, destinations, routes, showTraffic, 
   }, [origin, destinations, routes]);
 
   return (
-    <div
-      ref={containerRef}
-      style={{ width: '100%', height: '100%', background: '#F1F5F9' }}
-    />
+    <div ref={containerRef} style={{ width: '100%', height: '100%', background: '#F1F5F9' }} />
   );
 }
